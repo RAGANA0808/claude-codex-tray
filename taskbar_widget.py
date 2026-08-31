@@ -37,12 +37,17 @@ TASKBAR_CLASS = "Shell_TrayWnd"
 TRAY_NOTIFY_CLASS = "TrayNotifyWnd"
 EMBED_GAP = 24          # px kept clear between the widget and the clock
 
-# Measured on Windows 11 (transparency effects off): the taskbar strip is a
-# flat #111111, and it composites an embedded child window ADDITIVELY over
-# that background — everything drawn inside comes out 17/255 brighter. So the
-# widget paints BG and gets the taskbar colour back, and every other colour is
-# pre-darkened by the same amount while embedded (see TaskbarWidget._adj).
+# The Windows 11 taskbar composites an embedded child window ADDITIVELY over
+# its own backdrop: every pixel we draw comes out brighter by the backdrop's
+# colour. The backdrop differs per machine (theme, transparency effects,
+# wallpaper), so the widget CALIBRATES at runtime: it paints two known
+# colours, samples what actually reached the screen, and derives the offset
+# to pre-subtract (see TaskbarWidget._calibrate). #111111 is only the
+# initial guess (dark theme, transparency off). If the probe shows our
+# pixels never reach the screen, or the backdrop is too bright for the
+# additive model to stay legible, the widget falls back to float mode.
 TASKBAR_BG = "#111111"
+_CALIBRATION_STATE = None  # set to a Path by _calibration_state_path()
 BG = TASKBAR_BG
 BG_BAR = "#3a3a42"
 FG_LABEL = "#e8e8ee"
@@ -135,6 +140,69 @@ def _pick_color(pct: float | None, warn: int, danger: int) -> str:
 
 def _i32(v: int) -> int:
     return ctypes.c_int32(v & 0xFFFFFFFF).value
+
+
+def _sample_screen(x: int, y: int) -> tuple[int, int, int] | None:
+    """Read the composited screen pixel at physical coords (GetPixel)."""
+    try:
+        u = ctypes.windll.user32
+        g = ctypes.windll.gdi32
+        hdc = u.GetDC(0)
+        if not hdc:
+            return None
+        try:
+            c = g.GetPixel(hdc, int(x), int(y))
+        finally:
+            u.ReleaseDC(0, hdc)
+        if c in (-1, 0xFFFFFFFF):
+            return None
+        return c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF
+    except Exception:
+        return None
+
+
+def _classify_calibration(black: tuple | None, gray: tuple | None):
+    """Decide what the two probe samples mean.
+
+    black = screen pixel while we painted #000000 (→ the backdrop itself
+    under the additive model); gray = pixel while we painted #808080.
+    Returns (verdict, offset): verdict is 'ok' (additive confirmed),
+    'approx' (something composits, use black as best-effort offset),
+    'invisible' (our paint never reached the screen), 'too-bright'
+    (backdrop so light the additive model can't render legible text),
+    or 'unknown' (sampling failed — keep the configured guess).
+    """
+    if black is None or gray is None:
+        return 'unknown', None
+    delta = tuple(gy - bk for gy, bk in zip(gray, black))
+    if max(abs(d) for d in delta) < 10:
+        return 'invisible', None
+    if max(black) > 96:
+        return 'too-bright', None
+    if all(abs(d - 0x80) <= 48 for d in delta):
+        return 'ok', black
+    return 'approx', black
+
+
+def _calibration_state_path():
+    global _CALIBRATION_STATE
+    if _CALIBRATION_STATE is None:
+        from pathlib import Path as _Path
+        _CALIBRATION_STATE = (_Path.home() / '.claude' / 'cache'
+                              / 'tray-embed-calibration.json')
+    return _CALIBRATION_STATE
+
+
+def _write_calibration_state(payload: dict) -> None:
+    try:
+        import json
+        import time as _t
+        p = _calibration_state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = dict(payload, at=_t.time())
+        p.write_text(json.dumps(payload), encoding='utf-8')
+    except Exception:
+        pass
 
 
 def _find_taskbar() -> int:
@@ -241,7 +309,11 @@ class TaskbarWidget:
         self.embedded = False
         self._taskbar = 0
         self._visible = True
-        self._bg_offset = _hex_to_rgb(str(cfg.get("taskbar_bg") or TASKBAR_BG))
+        raw_bg = str(cfg.get("taskbar_bg") or "auto")
+        self._bg_auto = raw_bg.lower() == "auto"
+        self._bg_offset = (_hex_to_rgb(TASKBAR_BG) if self._bg_auto
+                           else _hex_to_rgb(raw_bg))
+        self._calibrating = False
         self._pending_right = 0
         self._drag_grab = 0
 
@@ -314,10 +386,74 @@ class TaskbarWidget:
     def _apply_mode(self):
         if self.wants_embed() and self._embed():
             self._apply_colors()
+            if self._bg_auto:
+                self.win.after(400, self._calibrate)
             return
         self._unembed()
         self._apply_colors()
         self._place_initial()
+
+    # --- runtime colour calibration -------------------------------
+
+    def _probe_paint(self, color: str) -> None:
+        self.canvas.delete("all")
+        try:
+            self.win.configure(bg=color)
+            self.canvas.configure(bg=color)
+            self.win.update_idletasks()
+        except tk.TclError:
+            pass
+
+    def _probe_point(self) -> tuple[int, int] | None:
+        r = _window_rect(self._hwnd)
+        if r is None:
+            return None
+        return (r[0] + r[2]) // 2, (r[1] + r[3]) // 2
+
+    def _calibrate(self) -> None:
+        """Measure how this machine's taskbar composites our pixels and adapt.
+
+        Paints solid black, samples the screen (→ the backdrop / additive
+        offset), paints 50%% gray, samples again (→ proves our drawing is
+        visible and the composite is additive). Runs asynchronously so the
+        compositor has time to show each frame.
+        """
+        if not self.embedded or self._calibrating or not self._visible:
+            return
+        self._calibrating = True
+        self._probe_paint("#000000")
+
+        def step2():
+            pt = self._probe_point()
+            s_black = _sample_screen(*pt) if pt else None
+            self._probe_paint("#808080")
+
+            def step3():
+                s_gray = _sample_screen(*pt) if pt else None
+                self._calibrating = False
+                verdict, offset = _classify_calibration(s_black, s_gray)
+                _write_calibration_state({
+                    "verdict": verdict, "black": s_black, "gray": s_gray,
+                    "offset": offset})
+                if verdict in ("ok", "approx") and offset is not None:
+                    self._bg_offset = offset
+                    self._apply_colors()
+                    self.redraw_last()
+                elif verdict in ("invisible", "too-bright"):
+                    # This taskbar can't show us legibly — float instead.
+                    print(f"[widget] embed calibration: {verdict} — "
+                          "falling back to float mode")
+                    self._unembed()
+                    self._apply_colors()
+                    self._place_initial()
+                    self.redraw_last()
+                else:  # unknown — keep the configured guess
+                    self._apply_colors()
+                    self.redraw_last()
+
+            self.win.after(250, step3)
+
+        self.win.after(250, step2)
 
     def set_embedded(self, on: bool):
         """Switch between living inside the taskbar and floating over it."""
@@ -527,6 +663,10 @@ class TaskbarWidget:
 
     def render(self, snap, cfg: dict):
         self._last_render = (snap, cfg)
+        if self._calibrating:
+            # A poller redraw would repaint over the probe colours and corrupt
+            # the samples; calibration ends with redraw_last(), so just record.
+            return
         t = cfg.get("thresholds", {})
         warn = int(t.get("warn", 50))
         danger = int(t.get("danger", 80))

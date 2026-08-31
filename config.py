@@ -46,10 +46,11 @@ DEFAULTS = {
     # Falls back to "float" automatically if the taskbar cannot be found.
     "widget_mode": "taskbar",
 
-    # Colour of the Windows taskbar strip. Used to cancel the additive blend
-    # applied to an embedded widget. Set to "#000000" to disable that
-    # correction (e.g. if transparency effects make the strip translucent).
-    "taskbar_bg": "#111111",
+    # Backdrop colour of the taskbar strip, used to cancel the additive
+    # blend applied to an embedded widget. "auto" (default) measures it at
+    # runtime — themes, transparency effects and wallpapers all change it.
+    # Set an explicit "#rrggbb" to pin it, or "#000000" for no correction.
+    "taskbar_bg": "auto",
 }
 
 

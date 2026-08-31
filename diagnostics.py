@@ -80,6 +80,28 @@ def collect() -> str:
         add("  Fable取得   : ロックなし")
     add("")
 
+    add("=== タスクバー埋め込み ===")
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                           r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        light = winreg.QueryValueEx(k, "SystemUsesLightTheme")[0]
+        trans = winreg.QueryValueEx(k, "EnableTransparency")[0]
+        add(f"  テーマ     : {'ライト' if light else 'ダーク'} / 透明効果 {'オン' if trans else 'オフ'}")
+    except Exception:
+        add("  テーマ     : (取得できず)")
+    cal = Path.home() / ".claude" / "cache" / "tray-embed-calibration.json"
+    if cal.exists():
+        try:
+            d = json.loads(cal.read_text(encoding="utf-8"))
+            add(f"  色較正     : {d.get('verdict')} offset={d.get('offset')} "
+                f"black={d.get('black')} gray={d.get('gray')} ({_fmt_age(d.get('at', 0))})")
+        except Exception as e:
+            add(f"  色較正     : ★読み取り失敗 {e}")
+    else:
+        add("  色較正     : まだ実行されていません")
+    add("")
+
     add("=== データソース ===")
     for label, key, sub in [("Claude ログ", "claude_dir", ".claude/projects"),
                             ("Codex ログ", "codex_dir", ".codex/sessions")]:

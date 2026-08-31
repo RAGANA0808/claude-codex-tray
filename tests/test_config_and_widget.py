@@ -72,3 +72,34 @@ def test_format_countdown_buckets():
     assert tw._format_countdown(now + 5 * 60 + 2) == "5m"
     assert tw._format_countdown(now + 3 * 3600 + 2) == "3h"
     assert tw._format_countdown(now + 2 * 86400 + 2) == "2d"
+
+
+# --- embed calibration decision --------------------------------------
+
+def test_calibration_additive_dark_confirmed():
+    # reon's machine: backdrop (17,17,17), gray probe comes back +128
+    v, off = tw._classify_calibration((17, 17, 17), (145, 145, 145))
+    assert v == "ok" and off == (17, 17, 17)
+
+
+def test_calibration_invisible_falls_back():
+    # paint changes nothing on screen → the XAML layer covers us
+    v, off = tw._classify_calibration((30, 30, 30), (31, 30, 32))
+    assert v == "invisible" and off is None
+
+
+def test_calibration_light_theme_falls_back():
+    # light taskbar backdrop → additive model saturates, unreadable
+    v, off = tw._classify_calibration((243, 242, 244), (255, 255, 255))
+    assert v == "too-bright" and off is None
+
+
+def test_calibration_alpha_blend_is_approx():
+    # visible but not additive (e.g. 50% alpha) → best-effort offset
+    v, off = tw._classify_calibration((20, 20, 22), (84, 84, 86))
+    assert v == "approx" and off == (20, 20, 22)
+
+
+def test_calibration_sampling_failure_keeps_guess():
+    assert tw._classify_calibration(None, (1, 2, 3)) == ("unknown", None)
+    assert tw._classify_calibration((1, 2, 3), None) == ("unknown", None)
