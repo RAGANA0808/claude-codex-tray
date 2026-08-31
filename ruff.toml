@@ -1,0 +1,8 @@
+# Lint gate for CI. Correctness rules only — this codebase deliberately uses
+# broad try/except around every win32 call, so style/robustness families that
+# fight that pattern stay off.
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = ["E4", "E7", "E9", "F", "B006", "B008"]

@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: python -m pip install --quiet pystray Pillow pytest ruff
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Byte-compile every module
+        run: python -m compileall -q .
+
+      - name: Unit tests
+        run: python -m pytest tests/ -v
+
+      - name: Icon generation works
+        run: python make_icon.py
+
+  build-check:
+    # Prove the exe still builds on every push to main (artifact kept 7 days,
+    # release binaries come from release.yml instead).
+    runs-on: windows-latest
+    needs: test
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build dependencies
+        run: python -m pip install --quiet pyinstaller pystray Pillow
+
+      - name: Generate icons
+        run: python make_icon.py
+
+      - name: Build exe
+        run: pyinstaller ClaudeCodexUsage.spec --noconfirm --clean
+
+      - name: Smoke-check the artifact exists
+        run: |
+          if (!(Test-Path dist/ClaudeCodexUsage.exe)) { exit 1 }
+          Get-Item dist/ClaudeCodexUsage.exe | Format-List Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeCodexUsage-dev
+          path: dist/ClaudeCodexUsage.exe
+          retention-days: 7

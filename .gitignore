@@ -1,0 +1,33 @@
+# secrets — never commit
+.env*
+!.env.example
+*.pem
+*.key
+*.pass
+id_rsa*
+secrets/
+credentials*
+token*.txt
+
+# build artifacts — binaries are distributed via GitHub Releases, never the repo
+dist/
+build/
+dist.zip
+*.exe
+
+# runtime state (generated next to the app)
+config.json
+診断結果.txt
+__pycache__/
+*.log
+
+# personal icon overrides (each user supplies their own artwork locally)
+app-*-custom.png
+app-claude-hi.png
+
+# local tooling
+.claude/
+.venv/
+venv/
+node_modules/
+_icon_preview.png
