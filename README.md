@@ -26,11 +26,20 @@ the config keys and code comments are in English.*
 前提条件は **Claude Code がログイン済みであること** だけです（`claude` CLI が
 PATH にあること）。Codex は使っていれば自動で表示、無ければ「—」になります。
 
-> **SmartScreen について**: コード署名をしていないため、初回起動時に Windows
-> SmartScreen の警告が出ます。「詳細情報」→「実行」で起動できます。exe は
-> GitHub Actions がこのリポジトリのソースからビルドしたもので、Release の
-> `SHA256SUMS.txt` で検証できます:
+> **「Windows によって PC が保護されました」と出る場合**:
+> コード署名をしていないため、ダウンロードした exe の初回起動時に
+> Windows SmartScreen のこの青い警告が出ます。異常ではありません。
+>
+> 1. 警告画面の **「詳細情報」** をクリック（リンクは左上の小さい文字です）
+> 2. 現れる **「実行」** ボタンをクリック
+>
+> 次回からは出ません。別の方法として、exe を右クリック → プロパティ →
+> 下部の「許可する」にチェック → OK でも解除できます。
+>
+> exe は GitHub Actions がこのリポジトリの公開ソースからビルドしたもので、
+> 改ざんされていないことは Release の `SHA256SUMS.txt` で検証できます:
 > `Get-FileHash ClaudeCodexUsage.exe -Algorithm SHA256`
+> 心配な場合は下記「ソースから動かす」の手順で自分でビルドしてください。
 
 ### ソースから動かす
 
