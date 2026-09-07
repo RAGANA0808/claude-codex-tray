@@ -17,6 +17,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # need the full tag history for the changelog
 
       - uses: actions/setup-python@v5
         with:
@@ -43,6 +45,33 @@ jobs:
           "$hash  ClaudeCodexUsage.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
           Get-Content dist/SHA256SUMS.txt
 
+      # Direct pushes to main produce no PRs, so GitHub's generated notes are
+      # only a compare link. List the commits since the previous tag instead.
+      # Every line is echoed (not a heredoc) so the whole script stays indented
+      # inside this YAML block scalar.
+      - name: Build release notes
+        shell: bash
+        run: |
+          prev=$(git tag --sort=-creatordate | grep -vFx "$GITHUB_REF_NAME" | head -1)
+          {
+            echo '## 変更点'
+            echo
+            if [ -n "$prev" ]; then
+              git log --no-merges --pretty='- %s' "$prev..$GITHUB_REF_NAME"
+            else
+              git log --no-merges --pretty='- %s'
+            fi
+            echo
+            echo '---'
+            echo
+            echo '単一ファイルの Windows 用 exe です。Python のインストールは不要です。'
+            echo
+            echo '**「Windows によって PC が保護されました」と出る場合**: コード署名をしていないため、初回起動時に SmartScreen の警告が出ます。異常ではありません。「詳細情報」（左上の小さいリンク）→「実行」で起動できます。次回からは出ません。'
+            echo
+            echo '**検証**: ダウンロード後、PowerShell で `Get-FileHash ClaudeCodexUsage.exe -Algorithm SHA256` を実行し、`SHA256SUMS.txt` の値と一致することを確認してください。exe は GitHub Actions が公開ソースから自動ビルドしたものです。'
+          } > CHANGES.md
+          cat CHANGES.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -50,9 +79,5 @@ jobs:
             dist/ClaudeCodexUsage.exe
             dist/SHA256SUMS.txt
           generate_release_notes: true
-          body: |
-            単一ファイルの Windows 用 exe です。Python のインストールは不要です。
-
-            **「Windows によって PC が保護されました」と出る場合**: コード署名をしていないため、初回起動時に SmartScreen の警告が出ます。異常ではありません。「詳細情報」（左上の小さいリンク）→「実行」で起動できます。次回からは出ません。
-
-            **検証**: ダウンロード後、PowerShell で `Get-FileHash ClaudeCodexUsage.exe -Algorithm SHA256` を実行し、SHA256SUMS.txt の値と一致することを確認してください。exe は GitHub Actions が公開ソースから自動ビルドしたものです。
+          body_path: CHANGES.md
+          append_body: true
