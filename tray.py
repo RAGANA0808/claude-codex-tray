@@ -38,6 +38,7 @@ APP_NAME = "Claude / Codex Usage Monitor"
 class App:
     def __init__(self):
         self.cfg = config.load()
+        parsers.set_live_refresh(self.cfg.get("live_refresh_seconds", 60))
         config.write_default_if_missing()
 
         self.root: tk.Tk | None = None
@@ -122,7 +123,7 @@ class App:
         return "\n".join(parts)
 
     def _poller(self):
-        interval = max(5, int(self.cfg.get("poll_seconds", 30)))
+        interval = max(3, int(self.cfg.get("poll_seconds", 10)))
         while not self._stop.is_set():
             try:
                 self._refresh_once()

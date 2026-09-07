@@ -104,24 +104,26 @@ class Dashboard:
         codex_frame = ttk.LabelFrame(body, text="  Codex CLI  ", padding=10)
         codex_frame.pack(fill="x", pady=(0, 10))
         self.codex_plan = ttk.Label(codex_frame, text="plan: ?")
-        self.codex_plan.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self.codex_plan.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
 
         self._row_with_bar(codex_frame, 1, "5時間枠", "codex_5h")
         self._row_with_bar(codex_frame, 2, "週次枠", "codex_week")
-        self.codex_event = ttk.Label(codex_frame, text="", foreground="#666")
-        self.codex_event.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.codex_event = ttk.Label(codex_frame, text="", foreground="#666",
+                                     wraplength=700, justify="left")
+        self.codex_event.grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
         # --- Claude section ---
         claude_frame = ttk.LabelFrame(body, text="  Claude Code  ", padding=10)
         claude_frame.pack(fill="x", pady=(0, 10))
-        self.claude_plan = ttk.Label(claude_frame, text="plan limit: ?")
-        self.claude_plan.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self.claude_plan = ttk.Label(claude_frame, text="plan limit: ?",
+                                     wraplength=700, justify="left")
+        self.claude_plan.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
 
         self._row_with_bar(claude_frame, 1, "5時間枠 (estimate)", "claude_5h")
         self._row_with_bar(claude_frame, 2, "週次枠 (estimate)", "claude_week")
         self.claude_models = ttk.Label(claude_frame, text="", foreground="#666",
                                        wraplength=460, justify="left")
-        self.claude_models.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.claude_models.grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
         # Footer
         footer = ttk.Frame(win, padding=(14, 0, 14, 12))
@@ -157,10 +159,16 @@ class Dashboard:
         # Codex
         c = snap.codex
         if c.available:
-            self.codex_plan.config(text=f"plan: {c.plan_type}    total_tokens: {c.total_tokens:,}")
+            plan = f"plan: {c.plan_type}    total_tokens: {c.total_tokens:,}"
+            if getattr(c, "limit_reached", False):
+                plan += "    ★上限に到達"
+            self.codex_plan.config(text=plan)
             self._set_bar("codex_5h", c.primary_pct, c.primary_resets_at)
             self._set_bar("codex_week", c.secondary_pct, c.secondary_resets_at)
-            self.codex_event.config(text=f"last event: {c.last_event_at}")
+            evt = f"last event: {c.last_event_at}"
+            if getattr(c, "limit_reached", False):
+                evt += "（枠を使い切ったため、直前の計測値を表示しています）"
+            self.codex_event.config(text=evt)
         else:
             self.codex_plan.config(text="plan: (Codex データなし)")
             self._set_bar("codex_5h", None, 0)

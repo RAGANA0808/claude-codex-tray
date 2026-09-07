@@ -30,6 +30,11 @@ class CodexSnapshot:
     secondary_window_minutes: int = 10080
     has_primary: bool = False       # False = no 5h window on this plan
     has_secondary: bool = False     # False = no 7d window
+    # Codex answers with a window-less bucket (credits) once the metered
+    # bucket is spent, so a blank newest reading means "used up", not
+    # "unknown". The percentages then come from the last windowed reading.
+    limit_reached: bool = False
+    reading_at: str = ""            # timestamp of the reading actually shown
     plan_type: str = "?"
     last_event_at: str = ""
     total_tokens: int = 0
@@ -75,40 +80,64 @@ def _iter_codex_files(root: Path) -> Iterable[Path]:
         yield p
 
 
-def _read_last_token_count(path: Path) -> dict | None:
-    """Scan a rollout JSONL for the *last* token_count event. Returns parsed payload or None."""
+def _rl_has_windows(rl: dict | None) -> bool:
+    """True when a rate_limits object carries at least one usage window."""
+    if not rl:
+        return False
+    return bool(rl.get("primary") or rl.get("secondary"))
+
+
+def _event_rate_limits(ev: dict | None) -> dict | None:
+    if not ev:
+        return None
+    return (ev.get("payload") or {}).get("rate_limits")
+
+
+def _event_has_windows(ev: dict) -> bool:
+    return _rl_has_windows(_event_rate_limits(ev))
+
+
+def _read_last_token_count(path: Path, predicate=None) -> dict | None:
+    """Scan a rollout JSONL backwards for the newest token_count event.
+
+    With `predicate`, return the newest event that satisfies it. Codex writes
+    one final window-less event when a limit bucket runs out, so callers pass
+    a predicate to recover the last reading that still carried usage windows.
+    """
+    def _newest_match(lines) -> dict | None:
+        for line in reversed(lines):
+            if '"token_count"' not in line:
+                continue
+            ev = _parse_event_line(line)
+            if ev is not None and (predicate is None or predicate(ev)):
+                return ev
+        return None
+
     try:
         size = path.stat().st_size
         if size == 0:
             return None
-        # Read from end in chunks until we find a token_count event.
         chunk = 64 * 1024
-        last_found = None
         with path.open("rb") as f:
             # Cheap path: read whole file if small.
             if size <= chunk * 4:
                 data = f.read().decode("utf-8", errors="ignore")
-                for line in data.splitlines():
-                    if '"token_count"' in line:
-                        last_found = line
-                return _parse_event_line(last_found) if last_found else None
-            # Larger: tail seek.
+                return _newest_match(data.splitlines())
+            # Larger: walk backwards a chunk at a time.
             buf = b""
             pos = size
-            while pos > 0 and last_found is None:
+            while pos > 0:
                 step = min(chunk, pos)
                 pos -= step
                 f.seek(pos)
                 buf = f.read(step) + buf
                 lines = buf.split(b"\n")
-                # Keep partial first line for next iter
-                buf = lines[0]
-                for line in reversed(lines[1:]):
-                    if b'"token_count"' in line:
-                        last_found = line.decode("utf-8", errors="ignore")
-                        break
-            if last_found:
-                return _parse_event_line(last_found)
+                buf = lines[0]   # partial line, carried into the next chunk
+                found = _newest_match(
+                    [ln.decode("utf-8", errors="ignore") for ln in lines[1:]])
+                if found is not None:
+                    return found
+            return _newest_match([buf.decode("utf-8", errors="ignore")])
     except Exception as e:
         print(f"[codex] read fail {path.name}: {e}")
     return None
@@ -137,16 +166,35 @@ def collect_codex(cfg: dict) -> CodexSnapshot:
         snap.note = "no rollout files"
         return snap
 
-    event = None
+    event = None       # newest reading that still carries usage windows
+    newest_rl = None   # newest rate_limits object of any shape
     # Walk a few recent files until we find a token_count event with rate_limits.
     for p in files[:20]:
         ev = _read_last_token_count(p)
-        if ev and ev.get("payload", {}).get("rate_limits"):
+        rl = _event_rate_limits(ev)
+        if not rl:
+            continue
+        if newest_rl is None:
+            newest_rl = rl
+        if _rl_has_windows(rl):
+            event = ev
+            break
+        # Bucket spent: Codex switched to a window-less one. The percentages
+        # are still in this file, one event earlier — blanking the display at
+        # exactly the moment the limit bites would hide what matters most.
+        ev = _read_last_token_count(p, predicate=_event_has_windows)
+        if ev:
             event = ev
             break
 
+    snap.limit_reached = bool(newest_rl) and not _rl_has_windows(newest_rl)
+
     if not event:
-        snap.note = "no token_count event with rate_limits"
+        snap.note = ("上限に到達しています（枠情報なし）" if snap.limit_reached
+                     else "no token_count event with rate_limits")
+        if newest_rl:
+            snap.available = True
+            snap.plan_type = str(newest_rl.get("plan_type", "?"))
         return snap
 
     payload = event["payload"]
@@ -195,8 +243,11 @@ def collect_codex(cfg: dict) -> CodexSnapshot:
         snap.has_secondary = True
 
     snap.available = True
-    snap.plan_type = str(rl.get("plan_type", "?"))
+    snap.plan_type = str((newest_rl or rl).get("plan_type", "?"))
     snap.last_event_at = event.get("timestamp", "")
+    snap.reading_at = event.get("timestamp", "")
+    if snap.limit_reached:
+        snap.note = "上限に到達しています（表示は直前の計測値）"
     snap.total_tokens = int(total)
     return snap
 
@@ -262,17 +313,19 @@ LIVE_CACHE_FILE = Path.home() / ".claude" / "cache" / "tray-live-cache.json"
 # unified-* response headers. This is the same pattern CodeZeno uses; 429 is
 # accepted as success (the headers are still present on 429).
 
-_LIVE_TTL_SEC = 300           # don't hit the API more often than this (5 min)
+# How often the live API may be re-queried. Overridable per install via
+# config.json `live_refresh_seconds` (see set_live_refresh).
+_LIVE_TTL_SEC = 60
 _LIVE_TOKEN_HEAD_RE = re.compile(r"CLAUDE_CODE_OAUTH_TOKEN=([^\s#]+)")
 # Persisted state so we don't re-hit /api/oauth/usage every poll when it 403s.
 _OAUTH_USAGE_STATE = Path.home() / ".claude" / "cache" / "tray-oauth-usage-state.json"
 _OAUTH_USAGE_FORBIDDEN_TTL = 24 * 3600
 _OAUTH_USAGE_LAST_GOOD = Path.home() / ".claude" / "cache" / "tray-oauth-usage-lastgood.json"
-_OAUTH_USAGE_REFRESH_TTL = 5 * 60             # want fresh data after this age
+_OAUTH_USAGE_REFRESH_TTL = 60                 # want fresh data after this age
 # Fable is a weekly counter — showing a stale value beats showing nothing.
 # Tolerate last-good for a full day; refresh happens every ~5min when possible.
 _OAUTH_USAGE_STALE_TTL = 24 * 60 * 60
-_OAUTH_USAGE_MIN_INTERVAL = 5 * 60            # don't hit endpoint more often than this
+_OAUTH_USAGE_MIN_INTERVAL = 60                # don't hit endpoint more often than this
 _OAUTH_USAGE_LAST_ATTEMPT = Path.home() / ".claude" / "cache" / "tray-oauth-usage-lastattempt.json"
 # Treat a token as expired this long before its real expiry. A request fired
 # in the final seconds of a token's life comes back 401, which used to be read
@@ -281,6 +334,24 @@ _TOKEN_EXPIRY_MARGIN_SEC = 300
 # Sentinel: the endpoint rejected the token itself (401). Distinct from a
 # scope refusal (403) because a 401 is fixed by refreshing, not by giving up.
 _OAUTH_UNAUTHORIZED = object()
+
+
+def set_live_refresh(seconds) -> float:
+    """Set how often the live API may be re-queried.
+
+    Codex reads local files and so follows the poll interval for free; the
+    Claude meters cost one tiny API request per refresh, which is why they
+    are cached separately. Floored at 15s to keep that request rate sane.
+    """
+    global _LIVE_TTL_SEC, _OAUTH_USAGE_REFRESH_TTL, _OAUTH_USAGE_MIN_INTERVAL
+    try:
+        s = max(15.0, float(seconds))
+    except (TypeError, ValueError):
+        s = 60.0
+    _LIVE_TTL_SEC = s
+    _OAUTH_USAGE_REFRESH_TTL = s
+    _OAUTH_USAGE_MIN_INTERVAL = s
+    return s
 
 
 def _find_long_lived_token() -> str | None:

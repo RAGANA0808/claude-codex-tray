@@ -9,7 +9,11 @@ HERE = paths.user_data_dir()
 CONFIG_PATH = paths.config_path()
 
 DEFAULTS = {
-    "poll_seconds": 30,
+    "poll_seconds": 10,
+    # Live API refresh interval. Lower = fresher Claude meters, at one tiny
+    # API request each. Codex reads local files and always follows
+    # poll_seconds. Values below 15 are clamped.
+    "live_refresh_seconds": 60,
     # Resolved at runtime from the current user's home so a config.json copied
     # between machines never carries another user's absolute paths.
     "claude_dir": None,
@@ -86,6 +90,7 @@ def write_default_if_missing() -> None:
         return
     seed = {
         "poll_seconds": DEFAULTS["poll_seconds"],
+        "live_refresh_seconds": DEFAULTS["live_refresh_seconds"],
         "claude_plan": DEFAULTS["claude_plan"],
         "plan_limits_usd": DEFAULTS["plan_limits_usd"],
         "thresholds": DEFAULTS["thresholds"],
