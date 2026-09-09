@@ -785,6 +785,13 @@ class TaskbarWidget:
         codex_7d = codex.secondary_pct if (codex.available and codex.has_secondary) else None
         codex_r5 = codex.primary_resets_at if (codex.available and codex.has_primary) else None
         codex_r7 = codex.secondary_resets_at if (codex.available and codex.has_secondary) else None
-        codex_anno = "!" if getattr(codex, "limit_reached", False) else ""
+        if getattr(codex, "limit_reached", False):
+            codex_anno = "!"
+        elif getattr(codex, "stale", False):
+            # The account keeps being spent by surfaces this tool cannot see,
+            # so an aged reading must not be read as the current figure.
+            codex_anno = "~"
+        else:
+            codex_anno = ""
         draw_side(half_w + pad_x, self._icon_codex, "X", codex_5h, codex_7d,
                   codex_r5, codex_r7, codex_anno)

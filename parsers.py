@@ -35,6 +35,11 @@ class CodexSnapshot:
     # "unknown". The percentages then come from the last windowed reading.
     limit_reached: bool = False
     reading_at: str = ""            # timestamp of the reading actually shown
+    # Codex only reports usage while it is running, and the account is shared
+    # with surfaces this tool cannot see (the desktop app, cloud tasks). A
+    # reading therefore ages, and an aged one must not read as live.
+    reading_age_seconds: float = 0.0
+    stale: bool = False
     plan_type: str = "?"
     last_event_at: str = ""
     total_tokens: int = 0
@@ -153,6 +158,51 @@ def _parse_event_line(line: str) -> dict | None:
     return None
 
 
+def _classify_slots(rl: dict) -> tuple[dict | None, dict | None]:
+    """Split a rate_limits object into (session, weekly) by window length.
+
+    Classified by window_minutes rather than by key, because Codex has moved
+    the 7d window between the primary and secondary slots before.
+    """
+    session_slot = weekly_slot = None
+    for slot_key in ("primary", "secondary"):
+        slot = (rl or {}).get(slot_key) or {}
+        if not slot:
+            continue
+        if int(slot.get("window_minutes", 0) or 0) <= 12 * 60:
+            session_slot = slot
+        else:
+            weekly_slot = slot
+    return session_slot, weekly_slot
+
+
+def _best_slot(readings: list[dict], want_weekly: bool, now_t: int) -> dict | None:
+    """Pick the reading that best describes the window running right now.
+
+    Parallel Codex sessions each record their own snapshot, and file mtime
+    does not track which snapshot is newest. Usage only climbs inside a
+    window, so the highest reading carrying the live window is the closest
+    to the truth; falling back to the newest reading when every window has
+    already rolled over.
+    """
+    cands = []
+    for ev in readings:
+        session_slot, weekly_slot = _classify_slots(_event_rate_limits(ev) or {})
+        slot = weekly_slot if want_weekly else session_slot
+        if not slot:
+            continue
+        cands.append((int(slot.get("resets_at", 0) or 0),
+                      float(slot.get("used_percent", 0.0) or 0.0), slot))
+    if not cands:
+        return None
+    live = [c for c in cands if c[0] > now_t]
+    if live:
+        newest_reset = max(c[0] for c in live)
+        same_window = [c for c in live if c[0] == newest_reset]
+        return max(same_window, key=lambda c: c[1])[2]
+    return cands[0][2]
+
+
 def collect_codex(cfg: dict) -> CodexSnapshot:
     root = Path(cfg["codex_dir"])
     snap = CodexSnapshot()
@@ -160,36 +210,32 @@ def collect_codex(cfg: dict) -> CodexSnapshot:
         snap.note = f"not found: {root}"
         return snap
 
-    # Find the latest rollout by mtime — that's the most recently active session.
+    # Sorting by mtime only finds which sessions are ACTIVE — mtime moves on
+    # any write, so it does not say which file holds the newest usage
+    # reading. Gather candidates from the recently touched sessions and let
+    # _best_slot decide, using the event timestamps.
     files = sorted(_iter_codex_files(root), key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
         snap.note = "no rollout files"
         return snap
 
-    event = None       # newest reading that still carries usage windows
-    newest_rl = None   # newest rate_limits object of any shape
-    # Walk a few recent files until we find a token_count event with rate_limits.
-    for p in files[:20]:
-        ev = _read_last_token_count(p)
-        rl = _event_rate_limits(ev)
-        if not rl:
-            continue
-        if newest_rl is None:
-            newest_rl = rl
-        if _rl_has_windows(rl):
-            event = ev
-            break
-        # Bucket spent: Codex switched to a window-less one. The percentages
-        # are still in this file, one event earlier — blanking the display at
-        # exactly the moment the limit bites would hide what matters most.
-        ev = _read_last_token_count(p, predicate=_event_has_windows)
+    readings: list[dict] = []   # last windowed reading of each recent session
+    newest_any: tuple[str, dict] | None = None   # newest rate_limits, any shape
+    for f in files[:20]:
+        ev_any = _read_last_token_count(f)
+        rl_any = _event_rate_limits(ev_any)
+        if rl_any and (newest_any is None
+                       or str(ev_any.get("timestamp", "")) > newest_any[0]):
+            newest_any = (str(ev_any.get("timestamp", "")), rl_any)
+        ev = (ev_any if _rl_has_windows(rl_any)
+              else _read_last_token_count(f, predicate=_event_has_windows))
         if ev:
-            event = ev
-            break
+            readings.append(ev)
 
+    newest_rl = newest_any[1] if newest_any else None
     snap.limit_reached = bool(newest_rl) and not _rl_has_windows(newest_rl)
 
-    if not event:
+    if not readings:
         snap.note = ("上限に到達しています（枠情報なし）" if snap.limit_reached
                      else "no token_count event with rate_limits")
         if newest_rl:
@@ -197,31 +243,22 @@ def collect_codex(cfg: dict) -> CodexSnapshot:
             snap.plan_type = str(newest_rl.get("plan_type", "?"))
         return snap
 
+    readings.sort(key=lambda e: str(e.get("timestamp", "")), reverse=True)
+    event = readings[0]
     payload = event["payload"]
     rl = payload.get("rate_limits", {}) or {}
     info = payload.get("info", {}) or {}
     total = (info.get("total_token_usage") or {}).get("total_tokens", 0)
 
-    # Classify each present slot by its window_minutes rather than trusting its
-    # position. Codex has changed which slot holds the 7d window before.
-    session_slot = None   # <= 12h window
-    weekly_slot = None    # > 12h window
-    for slot_key in ("primary", "secondary"):
-        slot = rl.get(slot_key) or {}
-        if not slot:
-            continue
-        win_min = int(slot.get("window_minutes", 0) or 0)
-        if win_min <= 12 * 60:
-            session_slot = slot
-        else:
-            weekly_slot = slot
+    now_t = int(time.time())
+    session_slot = _best_slot(readings, want_weekly=False, now_t=now_t)
+    weekly_slot = _best_slot(readings, want_weekly=True, now_t=now_t)
 
     def _extract(slot, default_win_min):
         pct = float(slot.get("used_percent", 0.0))
         reset = int(slot.get("resets_at", 0) or 0)
         win_min = int(slot.get("window_minutes", 0) or 0) or default_win_min
         # If reset is in the past, advance to the next window boundary.
-        now_t = int(time.time())
         if reset and now_t > reset:
             pct = 0.0
             step = max(60, win_min) * 60
@@ -246,8 +283,15 @@ def collect_codex(cfg: dict) -> CodexSnapshot:
     snap.plan_type = str((newest_rl or rl).get("plan_type", "?"))
     snap.last_event_at = event.get("timestamp", "")
     snap.reading_at = event.get("timestamp", "")
+    read_ts = _parse_iso8601(snap.reading_at)
+    if read_ts:
+        snap.reading_age_seconds = max(0.0, time.time() - read_ts)
+    stale_after = float(cfg.get("codex_stale_minutes", 10) or 10) * 60
+    snap.stale = snap.reading_age_seconds > stale_after
     if snap.limit_reached:
         snap.note = "上限に到達しています（表示は直前の計測値）"
+    elif snap.stale:
+        snap.note = "Codex の停止中は数値が更新されません（表示は最後の計測値）"
     snap.total_tokens = int(total)
     return snap
 

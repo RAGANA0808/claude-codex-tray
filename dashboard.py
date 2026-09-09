@@ -165,9 +165,23 @@ class Dashboard:
             self.codex_plan.config(text=plan)
             self._set_bar("codex_5h", c.primary_pct, c.primary_resets_at)
             self._set_bar("codex_week", c.secondary_pct, c.secondary_resets_at)
-            evt = f"last event: {c.last_event_at}"
+            age = getattr(c, "reading_age_seconds", 0.0)
+            if age >= 3600:
+                age_txt = f"{age / 3600:.1f}時間前"
+            elif age >= 60:
+                age_txt = f"{age / 60:.0f}分前"
+            else:
+                age_txt = "直近"
+            import parsers as _p
+            read_ts = _p._parse_iso8601(c.reading_at)
+            when = (datetime.fromtimestamp(read_ts).strftime("%m/%d %H:%M")
+                    if read_ts else c.reading_at or "-")
+            evt = f"計測: {when}（{age_txt}）"
             if getattr(c, "limit_reached", False):
-                evt += "（枠を使い切ったため、直前の計測値を表示しています）"
+                evt += "\n枠を使い切ったため、直前の計測値を表示しています"
+            elif getattr(c, "stale", False):
+                evt += ("\nCodex が動いている間しか記録されないため、"
+                        "実際の使用量はこれより多い場合があります")
             self.codex_event.config(text=evt)
         else:
             self.codex_plan.config(text="plan: (Codex データなし)")

@@ -110,3 +110,87 @@ def test_predicate_scan_works_on_large_files(tmp_path):
     snap = parsers.collect_codex({"codex_dir": str(tmp_path)})
     assert snap.limit_reached
     assert snap.primary_pct == 92.0
+
+
+# --- which reading wins ----------------------------------------------
+
+def _write_named(tmp_path, name, events, mtime=None):
+    import os
+    d = tmp_path / "2026" / "09" / "09"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"rollout-{name}.jsonl"
+    f.write_text("\n".join(events) + "\n", encoding="utf-8")
+    if mtime is not None:
+        os.utime(f, (mtime, mtime))
+    return f
+
+
+def _bucket(pct5, pct7, reset_in=3600):
+    now = int(time.time())
+    return {
+        "limit_id": "codex", "limit_name": None,
+        "primary": {"used_percent": pct5, "window_minutes": 300,
+                    "resets_at": now + reset_in},
+        "secondary": {"used_percent": pct7, "window_minutes": 10080,
+                      "resets_at": now + 4 * 86400},
+        "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
+        "plan_type": "plus", "rate_limit_reached_type": None,
+    }
+
+
+def test_file_mtime_does_not_decide_the_reading(tmp_path):
+    """mtime moves on any write, so the newest file can hold an older figure.
+
+    Parallel sessions each record their own snapshot; usage only climbs inside
+    a window, so the highest reading for the live window is the closest one.
+    """
+    now = time.time()
+    _write_named(tmp_path, "low",
+                 [_token_count(_bucket(87, 29), "2026-09-09T00:32:55.570Z")],
+                 mtime=now)              # newest mtime, lower reading
+    _write_named(tmp_path, "high",
+                 [_token_count(_bucket(90, 30), "2026-09-09T00:32:55.708Z")],
+                 mtime=now - 300)        # older mtime, newer/higher reading
+    snap = parsers.collect_codex({"codex_dir": str(tmp_path)})
+    assert snap.primary_pct == 90.0
+    assert snap.secondary_pct == 30.0
+
+
+def test_expired_window_never_beats_the_live_one(tmp_path):
+    """A high figure from a window that already reset must not be shown."""
+    now = time.time()
+    _write_named(tmp_path, "spent",
+                 [_token_count(_bucket(98, 40, reset_in=-600),
+                               "2026-09-09T00:10:00.000Z")], mtime=now)
+    _write_named(tmp_path, "current",
+                 [_token_count(_bucket(12, 31), "2026-09-09T00:40:00.000Z")],
+                 mtime=now - 60)
+    snap = parsers.collect_codex({"codex_dir": str(tmp_path)})
+    assert snap.primary_pct == 12.0
+
+
+def test_old_reading_is_flagged_stale(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    _write_named(tmp_path, "old", [_token_count(_bucket(87, 29), old)])
+    snap = parsers.collect_codex({"codex_dir": str(tmp_path)})
+    assert snap.stale
+    assert snap.reading_age_seconds > 3000
+    assert "更新されません" in snap.note
+
+
+def test_recent_reading_is_not_stale(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    fresh = (datetime.now(timezone.utc) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    _write_named(tmp_path, "fresh", [_token_count(_bucket(40, 20), fresh)])
+    snap = parsers.collect_codex({"codex_dir": str(tmp_path)})
+    assert not snap.stale and snap.note == ""
+
+
+def test_stale_threshold_is_configurable(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    _write_named(tmp_path, "mid", [_token_count(_bucket(40, 20), ts)])
+    cfg = {"codex_dir": str(tmp_path)}
+    assert parsers.collect_codex(cfg).stale                      # default 10min
+    assert not parsers.collect_codex({**cfg, "codex_stale_minutes": 60}).stale

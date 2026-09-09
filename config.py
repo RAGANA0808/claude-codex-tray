@@ -55,6 +55,11 @@ DEFAULTS = {
     # runtime — themes, transparency effects and wallpapers all change it.
     # Set an explicit "#rrggbb" to pin it, or "#000000" for no correction.
     "taskbar_bg": "auto",
+
+    # Codex only records usage while it runs, and the account is also spent by
+    # the desktop app and cloud tasks. A reading older than this is marked with
+    # "~" so it is never mistaken for the current figure.
+    "codex_stale_minutes": 10,
 }
 
 
