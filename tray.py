@@ -139,6 +139,7 @@ class App:
             MenuItem("ダッシュボードを開く", self._on_open_dashboard, default=True),
             MenuItem("ウィジェットを表示", self._on_toggle_widget,
                      checked=lambda _i: self._widget_visible),
+            MenuItem("表示設定…", self._on_open_settings),
             MenuItem("タスクバーに埋め込む", self._on_toggle_embed,
                      checked=lambda _i: self._embed_active()),
             MenuItem("ウィジェットの位置を既定に戻す", self._on_recenter_widget),
@@ -226,6 +227,70 @@ class App:
                 self._widget_visible = True
                 self._redraw_widget()
         self.root.after(0, toggle)
+
+    def _on_open_settings(self, *_):
+        if self.root is None:
+            return
+
+        def build():
+            win = tk.Toplevel(self.root)
+            win.title("表示設定 — Claude / Codex Usage")
+            win.resizable(False, False)
+            frame = tk.Frame(win, padx=16, pady=14)
+            frame.pack(fill="both", expand=True)
+
+            tk.Label(frame, text="タスクバーに表示する項目",
+                     font=("Segoe UI", 10, "bold")).pack(anchor="w")
+            tk.Label(frame, foreground="#666", justify="left",
+                     text="外した側は帯から消え、幅もその分だけ縮みます。\n"
+                          "両方を外すことはできません。").pack(anchor="w", pady=(2, 10))
+
+            v_claude = tk.BooleanVar(value=bool(self.cfg.get("show_claude", True)))
+            v_codex = tk.BooleanVar(value=bool(self.cfg.get("show_codex", True)))
+            warn = tk.Label(frame, foreground="#c04040", text="")
+
+            def guard(changed: tk.BooleanVar, other: tk.BooleanVar):
+                if not changed.get() and not other.get():
+                    changed.set(True)
+                    warn.config(text="少なくとも片方は表示する必要があります")
+                else:
+                    warn.config(text="")
+
+            tk.Checkbutton(frame, text="Claude Code（5h / F / 7d）",
+                           variable=v_claude,
+                           command=lambda: guard(v_claude, v_codex)).pack(anchor="w")
+            tk.Checkbutton(frame, text="Codex CLI（5h / 7d）",
+                           variable=v_codex,
+                           command=lambda: guard(v_codex, v_claude)).pack(anchor="w")
+            warn.pack(anchor="w", pady=(6, 0))
+
+            btns = tk.Frame(frame)
+            btns.pack(fill="x", pady=(14, 0))
+
+            def apply_and_close():
+                self._set_sides(v_claude.get(), v_codex.get())
+                win.destroy()
+
+            tk.Button(btns, text="OK", width=10,
+                      command=apply_and_close).pack(side="right")
+            tk.Button(btns, text="キャンセル", width=10,
+                      command=win.destroy).pack(side="right", padx=(0, 6))
+            # No transient(): the root is withdrawn, and a transient of a
+            # withdrawn master never gets mapped.
+            win.lift()
+            win.focus_force()
+
+        self.root.after(0, build)
+
+    def _set_sides(self, show_claude: bool, show_codex: bool):
+        if not (show_claude or show_codex):
+            return
+        self.cfg["show_claude"] = bool(show_claude)
+        self.cfg["show_codex"] = bool(show_codex)
+        self._save_cfg_field("show_claude", bool(show_claude))
+        self._save_cfg_field("show_codex", bool(show_codex))
+        if self.widget is not None:
+            self.widget.relayout()
 
     def _embed_active(self) -> bool:
         return bool(self.widget is not None and self.widget.embedded)
@@ -318,6 +383,7 @@ class App:
         m.add_command(label="今すぐ更新", command=lambda: threading.Thread(target=self._refresh_once, daemon=True).start())
         m.add_separator()
         m.add_command(label="ウィジェットを隠す", command=self._on_toggle_widget)
+        m.add_command(label="表示設定…", command=self._on_open_settings)
         m.add_command(label="タスクバーに埋め込む / 解除", command=self._on_toggle_embed)
         m.add_command(label="位置を既定に戻す", command=self._on_recenter_widget)
         m.add_separator()
@@ -403,7 +469,7 @@ class App:
             pass
 
         # Pixel geometry has to know the real DPI before any window is built.
-        tw_scale = taskbar_widget.init_scale(self.root)
+        tw_scale = taskbar_widget.init_scale(self.root, self.cfg)
         print(f"[widget] dpi scale = {tw_scale:.2f}")
 
         self.dashboard = Dashboard(refresh=self._latest_snapshot, cfg=self.cfg)

@@ -50,6 +50,11 @@ DEFAULTS = {
     # Falls back to "float" automatically if the taskbar cannot be found.
     "widget_mode": "taskbar",
 
+    # Which halves of the bar to draw. Turning one off narrows the widget
+    # instead of leaving a gap. Both off is treated as both on.
+    "show_claude": True,
+    "show_codex": True,
+
     # Backdrop colour of the taskbar strip, used to cancel the additive
     # blend applied to an embedded widget. "auto" (default) measures it at
     # runtime — themes, transparency effects and wallpapers all change it.
@@ -104,6 +109,8 @@ def write_default_if_missing() -> None:
         "claude_plan": DEFAULTS["claude_plan"],
         "plan_limits_usd": DEFAULTS["plan_limits_usd"],
         "thresholds": DEFAULTS["thresholds"],
+        "show_claude": DEFAULTS["show_claude"],
+        "show_codex": DEFAULTS["show_codex"],
     }
     CONFIG_PATH.write_text(
         json.dumps(seed, indent=2, ensure_ascii=False), encoding="utf-8"

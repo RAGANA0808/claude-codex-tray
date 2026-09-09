@@ -62,12 +62,30 @@ COLOR_FABLE = "#9b7cd6"  # violet, matches CodeZeno PR #49
 # the taskbar makes this mandatory: a child of the (DPI-aware) taskbar gets
 # no DWM scaling of its own, so an unscaled bar renders at 2/3 size on a
 # 150% display.
-BASE_WIDTH = 500
 BASE_HEIGHT = 48
 BASE_ICON_PX = 28
 SCALE = 1.0
-WIDTH = BASE_WIDTH
 HEIGHT = BASE_HEIGHT
+
+# Column widths are measured from the real font rather than guessed: the
+# old fixed 22px percentage column fitted "87%" but not "100%", so a full
+# meter printed straight over the reset countdown beside it.
+PAD_X = 8
+GAP_ICON = 6
+GAP = 3
+BAR_W = 36
+BAR_H = 12
+ROW_Y_TOP = 6
+INTER_GROUP_GAP = 8
+CAP_W = 12
+PCT_W = 22
+TIME_W = 20
+GROUP_W = CAP_W + GAP + BAR_W + GAP + PCT_W + GAP + TIME_W
+WIDTH = 500
+
+FONT_CAP = ("Segoe UI", 8)
+FONT_PCT = ("Segoe UI Semibold", 9)
+FONT_TIME = ("Segoe UI", 9)
 
 
 def _format_countdown(reset_epoch: float | int | None) -> str:
@@ -103,18 +121,73 @@ def set_dpi_awareness() -> None:
             pass
 
 
-def init_scale(root) -> float:
-    """Derive the pixel scale from the real DPI. Tk already scales point-sized
-    fonts by the same factor, so only pixel geometry is adjusted here."""
-    global SCALE, WIDTH, HEIGHT, ICON_PX
+def init_scale(root, cfg: dict | None = None) -> float:
+    """Derive the pixel scale from the real DPI, then size every column from
+    the font actually in use. Tk scales point-sized fonts by the same factor,
+    so only pixel geometry is adjusted here."""
+    global SCALE, HEIGHT, ICON_PX
+    global PAD_X, GAP_ICON, GAP, BAR_W, BAR_H, ROW_Y_TOP, INTER_GROUP_GAP
+    global CAP_W, PCT_W, TIME_W, GROUP_W
     try:
         SCALE = max(1.0, float(root.winfo_fpixels("1i")) / 96.0)
     except Exception:
         SCALE = 1.0
-    WIDTH = int(round(BASE_WIDTH * SCALE))
+
+    def sc(v: float) -> int:
+        return int(round(v * SCALE))
+
     HEIGHT = int(round(BASE_HEIGHT * SCALE))
     ICON_PX = int(round(BASE_ICON_PX * SCALE))
+    PAD_X, GAP_ICON, GAP = sc(8), sc(6), sc(3)
+    BAR_W, BAR_H, ROW_Y_TOP = sc(36), sc(12), sc(6)
+    INTER_GROUP_GAP = sc(8)
+
+    def widest(font, samples) -> int:
+        try:
+            import tkinter.font as tkfont
+            f = tkfont.Font(root=root, family=font[0], size=font[1])
+            return max(f.measure(s) for s in samples)
+        except Exception:
+            return 0
+
+    # Widest string each column ever has to hold.
+    CAP_W = max(widest(FONT_CAP, ("5h", "7d", "F")), sc(12))
+    PCT_W = max(widest(FONT_PCT, ("100%", "—")), sc(22))
+    TIME_W = max(widest(FONT_TIME, ("<1m", "now", "10d", "23h", "59m")), sc(20))
+    GROUP_W = CAP_W + GAP + BAR_W + GAP + PCT_W + GAP + TIME_W
+    apply_layout(cfg or {})
     return SCALE
+
+
+def sides_shown(cfg: dict) -> tuple[bool, bool]:
+    """(claude, codex) — never both off, that would leave an empty bar."""
+    claude = bool(cfg.get("show_claude", True))
+    codex = bool(cfg.get("show_codex", True))
+    return (True, True) if not (claude or codex) else (claude, codex)
+
+
+def side_width(with_extra: bool) -> int:
+    """Claude carries a second group on its top row (the Fable meter), so the
+    two sides are sized independently instead of splitting the bar in half."""
+    w = ICON_PX + GAP_ICON + GROUP_W
+    if with_extra:
+        w += INTER_GROUP_GAP + GROUP_W
+    return w
+
+
+def apply_layout(cfg: dict) -> int:
+    """Set WIDTH from the columns and from which sides are switched on."""
+    global WIDTH
+    show_claude, show_codex = sides_shown(cfg)
+    total = PAD_X
+    if show_claude:
+        total += side_width(True) + PAD_X
+    if show_claude and show_codex:
+        total += PAD_X
+    if show_codex:
+        total += side_width(False) + PAD_X
+    WIDTH = total
+    return WIDTH
 
 HERE = paths.exe_dir()
 
@@ -473,6 +546,11 @@ class TaskbarWidget:
                 return False
             self._taskbar = tb
             self.embedded = True
+            # Repaint in the embedded palette BEFORE the window is shown at its
+            # slot: the canvas is built in the floating colours, and the taskbar
+            # keeps whatever a child last drew, so showing it first burns that
+            # uncorrected shade into the strip.
+            self._apply_colors()
             self._place_embedded()
             return True
         except Exception as e:
@@ -630,6 +708,21 @@ class TaskbarWidget:
             return self._visible
         return bool(self.win.winfo_viewable())
 
+    def relayout(self):
+        """Re-measure the bar after a settings change and put it back."""
+        apply_layout(self.cfg)
+        try:
+            self._blank()
+            self.canvas.configure(width=WIDTH, height=HEIGHT)
+            self.win.geometry(f"{WIDTH}x{HEIGHT}")
+        except tk.TclError:
+            return
+        if self.embedded:
+            self._place_embedded()
+        else:
+            self._place_initial()
+        self.redraw_last()
+
     def redraw_last(self):
         if getattr(self, "_last_render", None):
             self.render(*self._last_render)
@@ -677,18 +770,13 @@ class TaskbarWidget:
         def sc(v: float) -> int:
             return int(round(v * SCALE))
 
-        pad_x = sc(8)
-        gap_icon = sc(6)
-        half_w = WIDTH // 2
-        bar_h = sc(12)
-        row_y_top = sc(6)
+        pad_x, gap_icon = PAD_X, GAP_ICON
+        bar_h, bar_w = BAR_H, BAR_W
+        row_y_top = ROW_Y_TOP
         row_y_bot = HEIGHT - row_y_top - bar_h
-        cap_w = sc(12)
-        pct_w = sc(22)
-        time_w = sc(20)
-        bar_w = sc(36)
-        group_w = cap_w + sc(2) + bar_w + sc(3) + pct_w + sc(2) + time_w
-        inter_group_gap = sc(6)
+        cap_w, pct_w = CAP_W, PCT_W
+        group_w, inter_group_gap = GROUP_W, INTER_GROUP_GAP
+        show_claude, show_codex = sides_shown(cfg)
 
         codex = snap.codex
         claude = snap.claude
@@ -729,7 +817,7 @@ class TaskbarWidget:
                 c.create_text(gx + cap_w / 2, y + bar_h / 2,
                               text=caption, fill=self._adj(FG_DIM),
                               font=("Segoe UI", 8))
-                bxx = gx + cap_w + sc(2)
+                bxx = gx + cap_w + GAP
                 c.create_rectangle(bxx, y, bxx + bar_w, y + bar_h,
                                    fill=self._adj(BG_BAR), outline="")
                 if pct is not None:
@@ -741,13 +829,13 @@ class TaskbarWidget:
                             fill=self._adj(color), outline="",
                         )
                 txt = "—" if pct is None else f"{pct:.0f}%"
-                c.create_text(bxx + bar_w + sc(3), y + bar_h / 2,
+                c.create_text(bxx + bar_w + GAP, y + bar_h / 2,
                               text=txt, anchor="w",
                               fill=self._adj(FG_LABEL),
                               font=("Segoe UI Semibold", 9))
                 cd = _format_countdown(reset_epoch)
                 if cd:
-                    c.create_text(bxx + bar_w + sc(3) + pct_w + sc(2), y + bar_h / 2,
+                    c.create_text(bxx + bar_w + GAP + pct_w + GAP, y + bar_h / 2,
                                   text=cd, anchor="w",
                                   fill=self._adj(FG_DIM), font=("Segoe UI", 9))
 
@@ -772,14 +860,18 @@ class TaskbarWidget:
             if not fable_on:
                 fable_pct = 0.0
                 fable_reset = None
-        draw_side(pad_x, self._icon_claude, "C", claude_5h, claude_7d,
-                  claude_r5, claude_r7, claude_anno,
-                  extra_pct=fable_pct, extra_reset=fable_reset,
-                  extra_caption="F", extra_color=COLOR_FABLE)
+        x = pad_x
+        if show_claude:
+            draw_side(x, self._icon_claude, "C", claude_5h, claude_7d,
+                      claude_r5, claude_r7, claude_anno,
+                      extra_pct=fable_pct, extra_reset=fable_reset,
+                      extra_caption="F", extra_color=COLOR_FABLE)
+            x += side_width(True) + pad_x
 
-        mid_x = half_w
-        c.create_line(mid_x, sc(6), mid_x, HEIGHT - sc(6),
-                      fill=self._adj("#33333a"))
+        if show_claude and show_codex:
+            c.create_line(x, ROW_Y_TOP, x, HEIGHT - ROW_Y_TOP,
+                          fill=self._adj("#33333a"))
+            x += pad_x
 
         codex_5h = codex.primary_pct if (codex.available and codex.has_primary) else None
         codex_7d = codex.secondary_pct if (codex.available and codex.has_secondary) else None
@@ -793,5 +885,6 @@ class TaskbarWidget:
             codex_anno = "~"
         else:
             codex_anno = ""
-        draw_side(half_w + pad_x, self._icon_codex, "X", codex_5h, codex_7d,
-                  codex_r5, codex_r7, codex_anno)
+        if show_codex:
+            draw_side(x, self._icon_codex, "X", codex_5h, codex_7d,
+                      codex_r5, codex_r7, codex_anno)

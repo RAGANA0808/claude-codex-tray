@@ -52,7 +52,7 @@ icon_claude = load_icon("claude", tw.ICON_PX)
 icon_codex = load_icon("codex", tw.ICON_PX)
 
 pad_x = 8
-gap_icon = 6
+gap_icon = tw.GAP_ICON
 half_w = W // 2
 bar_h = 12
 row_y_top = 6
