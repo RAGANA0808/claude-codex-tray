@@ -40,6 +40,7 @@ class CodexSnapshot:
     # reading therefore ages, and an aged one must not read as live.
     reading_age_seconds: float = 0.0
     stale: bool = False
+    source: str = "local"          # "live" once the usage endpoint answers
     plan_type: str = "?"
     last_event_at: str = ""
     total_tokens: int = 0
@@ -158,6 +159,111 @@ def _parse_event_line(line: str) -> dict | None:
     return None
 
 
+# --- Codex live usage -------------------------------------------------
+# Rollout files only hold what the CLI itself observed, so they stop moving
+# the moment Codex stops — while the account keeps being spent by the desktop
+# app and cloud tasks. This is the endpoint the official client reads, using
+# the credentials Codex already stored locally. Host is hardcoded; the token
+# goes nowhere else and is never written to a log or cache.
+_CODEX_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
+_CODEX_AUTH_FILE = Path.home() / ".codex" / "auth.json"
+_CODEX_LIVE_CACHE = Path.home() / ".claude" / "cache" / "tray-codex-usage.json"
+_CODEX_LIVE_TTL = 60.0          # kept in step with set_live_refresh()
+_CODEX_LIVE_STALE_TTL = 24 * 3600
+
+
+def _read_json_cache(path: Path, max_age: float) -> dict | None:
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        if time.time() - float(d.get("fetched_at", 0)) > max_age:
+            return None
+        return d
+    except Exception:
+        return None
+
+
+def _write_json_cache(path: Path, payload: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def _codex_auth() -> tuple[str, str] | None:
+    """Access token + account id that Codex itself stored at login."""
+    try:
+        d = json.loads(_CODEX_AUTH_FILE.read_text(encoding="utf-8"))
+        t = d.get("tokens") or {}
+        tok, acct = t.get("access_token"), t.get("account_id")
+        return (tok, acct) if tok and acct else None
+    except Exception:
+        return None
+
+
+def _fetch_codex_usage() -> dict | None:
+    """Account-wide Codex usage, or None when it cannot be read."""
+    cached = _read_json_cache(_CODEX_LIVE_CACHE, _CODEX_LIVE_TTL)
+    if cached is not None:
+        return cached
+    auth = _codex_auth()
+    if not auth:
+        return None
+    token, account_id = auth
+    req = urllib.request.Request(_CODEX_USAGE_URL, headers={
+        "Authorization": "Bearer " + token,
+        "chatgpt-account-id": account_id,
+        "originator": "codex_cli_rs",
+        # A default urllib agent string is refused by the edge with a 403.
+        "User-Agent": "codex_cli_rs",
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # 401 means Codex has not refreshed its token yet; the local rollout
+        # files still work, so fall back rather than blanking the meters.
+        if e.code == 429:
+            return _read_json_cache(_CODEX_LIVE_CACHE, _CODEX_LIVE_STALE_TTL)
+        return None
+    except Exception:
+        return None
+    if not isinstance(body, dict) or not body.get("rate_limit"):
+        return None
+    body["fetched_at"] = time.time()
+    _write_json_cache(_CODEX_LIVE_CACHE, body)
+    return body
+
+
+def _apply_codex_live(snap: CodexSnapshot, live: dict) -> None:
+    rl = live.get("rate_limit") or {}
+    for key, is_weekly in (("primary_window", False), ("secondary_window", True)):
+        win = rl.get(key) or {}
+        if not win:
+            continue
+        pct = float(win.get("used_percent") or 0.0)
+        reset = int(win.get("reset_at") or 0)
+        win_min = int((win.get("limit_window_seconds") or 0) / 60) or (10080 if is_weekly else 300)
+        if is_weekly:
+            snap.secondary_pct, snap.secondary_resets_at = pct, reset
+            snap.secondary_window_minutes, snap.has_secondary = win_min, True
+        else:
+            snap.primary_pct, snap.primary_resets_at = pct, reset
+            snap.primary_window_minutes, snap.has_primary = win_min, True
+    snap.available = True
+    snap.source = "live"
+    snap.plan_type = str(live.get("plan_type") or snap.plan_type)
+    snap.limit_reached = bool(rl.get("limit_reached")) or not rl.get("allowed", True)
+    fetched = float(live.get("fetched_at") or time.time())
+    snap.reading_age_seconds = max(0.0, time.time() - fetched)
+    snap.reading_at = datetime.fromtimestamp(fetched).isoformat(timespec="seconds")
+    snap.stale = False
+    snap.note = "上限に到達しています" if snap.limit_reached else ""
+
+
 def _classify_slots(rl: dict) -> tuple[dict | None, dict | None]:
     """Split a rate_limits object into (session, weekly) by window length.
 
@@ -204,6 +310,17 @@ def _best_slot(readings: list[dict], want_weekly: bool, now_t: int) -> dict | No
 
 
 def collect_codex(cfg: dict) -> CodexSnapshot:
+    """Live account usage when the endpoint answers, local rollout files
+    otherwise. The local path still supplies total_tokens either way."""
+    snap = _collect_codex_local(cfg)
+    if cfg.get("codex_live", True):
+        live = _fetch_codex_usage()
+        if live:
+            _apply_codex_live(snap, live)
+    return snap
+
+
+def _collect_codex_local(cfg: dict) -> CodexSnapshot:
     root = Path(cfg["codex_dir"])
     snap = CodexSnapshot()
     if not root.exists():
@@ -388,6 +505,7 @@ def set_live_refresh(seconds) -> float:
     are cached separately. Floored at 15s to keep that request rate sane.
     """
     global _LIVE_TTL_SEC, _OAUTH_USAGE_REFRESH_TTL, _OAUTH_USAGE_MIN_INTERVAL
+    global _CODEX_LIVE_TTL
     try:
         s = max(15.0, float(seconds))
     except (TypeError, ValueError):
@@ -395,6 +513,7 @@ def set_live_refresh(seconds) -> float:
     _LIVE_TTL_SEC = s
     _OAUTH_USAGE_REFRESH_TTL = s
     _OAUTH_USAGE_MIN_INTERVAL = s
+    _CODEX_LIVE_TTL = s
     return s
 
 

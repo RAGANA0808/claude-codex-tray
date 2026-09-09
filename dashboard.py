@@ -176,9 +176,12 @@ class Dashboard:
             read_ts = _p._parse_iso8601(c.reading_at)
             when = (datetime.fromtimestamp(read_ts).strftime("%m/%d %H:%M")
                     if read_ts else c.reading_at or "-")
-            evt = f"計測: {when}（{age_txt}）"
+            is_live = getattr(c, "source", "local") == "live"
+            evt = (f"LIVE API（{age_txt}取得）" if is_live
+                   else f"計測: {when}（{age_txt}）")
             if getattr(c, "limit_reached", False):
-                evt += "\n枠を使い切ったため、直前の計測値を表示しています"
+                evt += ("\n上限に到達しています" if is_live
+                        else "\n枠を使い切ったため、直前の計測値を表示しています")
             elif getattr(c, "stale", False):
                 evt += ("\nCodex が動いている間しか記録されないため、"
                         "実際の使用量はこれより多い場合があります")

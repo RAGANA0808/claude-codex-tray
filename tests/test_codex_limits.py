@@ -7,7 +7,15 @@ bucket runs out, Codex writes one final event for a window-less bucket
 import json
 import time
 
+import pytest
+
 import parsers
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """Keep the suite off the network. Live tests opt in by patching again."""
+    monkeypatch.setattr(parsers, "_fetch_codex_usage", lambda: None)
 
 
 def _token_count(rate_limits: dict, ts: str) -> str:
@@ -194,3 +202,71 @@ def test_stale_threshold_is_configurable(tmp_path):
     cfg = {"codex_dir": str(tmp_path)}
     assert parsers.collect_codex(cfg).stale                      # default 10min
     assert not parsers.collect_codex({**cfg, "codex_stale_minutes": 60}).stale
+
+
+# --- live account usage ----------------------------------------------
+
+LIVE_BODY = {
+    "plan_type": "plus",
+    "rate_limit": {
+        "allowed": True, "limit_reached": False,
+        "primary_window": {"used_percent": 99, "limit_window_seconds": 18000,
+                           "reset_after_seconds": 13232, "reset_at": 1788931758},
+        "secondary_window": {"used_percent": 31, "limit_window_seconds": 604800,
+                             "reset_after_seconds": 531871, "reset_at": 1789450398},
+    },
+}
+
+
+def test_live_usage_overrides_the_local_reading(tmp_path, monkeypatch):
+    """Rollout files go stale; the account endpoint is the truth."""
+    _write_named(tmp_path, "old", [_token_count(_bucket(90, 30),
+                                                "2026-09-09T00:32:55.708Z")])
+    monkeypatch.setattr(parsers, "_fetch_codex_usage",
+                        lambda: dict(LIVE_BODY, fetched_at=time.time()))
+    snap = parsers.collect_codex({"codex_dir": str(tmp_path)})
+    assert snap.source == "live"
+    assert snap.primary_pct == 99.0        # not the 90 in the rollout file
+    assert snap.secondary_pct == 31.0
+    assert snap.primary_resets_at == 1788931758
+    assert snap.primary_window_minutes == 300
+    assert snap.secondary_window_minutes == 10080
+    assert not snap.stale                  # a live figure is never stale
+    assert snap.total_tokens == 1234       # still taken from the local files
+
+
+def test_live_failure_falls_back_to_local(tmp_path, monkeypatch):
+    _write_named(tmp_path, "only", [_token_count(_bucket(90, 30),
+                                                 "2026-09-09T00:32:55.708Z")])
+    monkeypatch.setattr(parsers, "_fetch_codex_usage", lambda: None)
+    snap = parsers.collect_codex({"codex_dir": str(tmp_path)})
+    assert snap.source == "local"
+    assert snap.primary_pct == 90.0
+
+
+def test_live_can_be_switched_off(tmp_path, monkeypatch):
+    _write_named(tmp_path, "only", [_token_count(_bucket(90, 30),
+                                                 "2026-09-09T00:32:55.708Z")])
+    def _boom():
+        raise AssertionError("must not be called when codex_live is false")
+    monkeypatch.setattr(parsers, "_fetch_codex_usage", _boom)
+    snap = parsers.collect_codex({"codex_dir": str(tmp_path), "codex_live": False})
+    assert snap.source == "local" and snap.primary_pct == 90.0
+
+
+def test_live_limit_reached_is_reported(tmp_path, monkeypatch):
+    body = json.loads(json.dumps(LIVE_BODY))
+    body["rate_limit"]["limit_reached"] = True
+    body["rate_limit"]["allowed"] = False
+    body["rate_limit"]["primary_window"]["used_percent"] = 100
+    _write_named(tmp_path, "only", [_token_count(_bucket(90, 30),
+                                                 "2026-09-09T00:32:55.708Z")])
+    monkeypatch.setattr(parsers, "_fetch_codex_usage",
+                        lambda: dict(body, fetched_at=time.time()))
+    snap = parsers.collect_codex({"codex_dir": str(tmp_path)})
+    assert snap.limit_reached and snap.primary_pct == 100.0
+    assert "上限" in snap.note
+
+
+def test_live_never_sends_the_token_elsewhere():
+    assert parsers._CODEX_USAGE_URL.startswith("https://chatgpt.com/")

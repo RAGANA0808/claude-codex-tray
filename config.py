@@ -60,6 +60,11 @@ DEFAULTS = {
     # the desktop app and cloud tasks. A reading older than this is marked with
     # "~" so it is never mistaken for the current figure.
     "codex_stale_minutes": 10,
+
+    # Read account-wide Codex usage from the same endpoint the Codex app
+    # uses, with the token Codex already stored. Set false to stay fully
+    # offline and rely on the local rollout files only.
+    "codex_live": True,
 }
 
 
