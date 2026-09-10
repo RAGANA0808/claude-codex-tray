@@ -78,6 +78,14 @@ def collect() -> str:
         add(f"  Fable取得   : ★停止中 (403でロック / 解除まであと{left:.1f}時間)")
     else:
         add("  Fable取得   : ロックなし")
+    try:
+        wait = parsers._oauth_usage_backoff_remaining()
+    except Exception:
+        wait = 0
+    if wait > 0:
+        add(f"  使用量API   : ★429で待機中 (あと{wait/60:.0f}分)")
+    else:
+        add(f"  使用量API   : 待機なし (最短間隔 {parsers._OAUTH_USAGE_MIN_INTERVAL:.0f}秒)")
     add("")
 
     add("=== タスクバー埋め込み ===")

@@ -50,6 +50,11 @@ DEFAULTS = {
     # Falls back to "float" automatically if the taskbar cannot be found.
     "widget_mode": "taskbar",
 
+    # "auto" follows the Windows taskbar shade; "light"/"dark" force one.
+    # A light taskbar cannot host the widget (see apply_theme), so the bar
+    # floats over it in the light palette instead.
+    "theme": "auto",
+
     # Which halves of the bar to draw. Turning one off narrows the widget
     # instead of leaving a gap. Both off is treated as both on.
     "show_claude": True,

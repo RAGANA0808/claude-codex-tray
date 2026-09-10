@@ -482,11 +482,17 @@ _LIVE_TOKEN_HEAD_RE = re.compile(r"CLAUDE_CODE_OAUTH_TOKEN=([^\s#]+)")
 _OAUTH_USAGE_STATE = Path.home() / ".claude" / "cache" / "tray-oauth-usage-state.json"
 _OAUTH_USAGE_FORBIDDEN_TTL = 24 * 3600
 _OAUTH_USAGE_LAST_GOOD = Path.home() / ".claude" / "cache" / "tray-oauth-usage-lastgood.json"
-_OAUTH_USAGE_REFRESH_TTL = 60                 # want fresh data after this age
+_OAUTH_USAGE_REFRESH_TTL = 120                # want fresh data after this age
 # Fable is a weekly counter — showing a stale value beats showing nothing.
 # Tolerate last-good for a full day; refresh happens every ~5min when possible.
 _OAUTH_USAGE_STALE_TTL = 24 * 60 * 60
-_OAUTH_USAGE_MIN_INTERVAL = 60                # don't hit endpoint more often than this
+_OAUTH_USAGE_MIN_INTERVAL = 120               # don't hit endpoint more often than this
+# /api/oauth/usage answers 429 long before /v1/messages does, so it keeps a
+# floor of its own and backs off further every time it is refused. Polling
+# it too hard is how the Fable meter goes stale and then vanishes.
+_OAUTH_USAGE_FLOOR = 120.0
+_OAUTH_USAGE_BACKOFF_MIN = 300.0
+_OAUTH_USAGE_BACKOFF_MAX = 3600.0
 _OAUTH_USAGE_LAST_ATTEMPT = Path.home() / ".claude" / "cache" / "tray-oauth-usage-lastattempt.json"
 # Treat a token as expired this long before its real expiry. A request fired
 # in the final seconds of a token's life comes back 401, which used to be read
@@ -511,8 +517,8 @@ def set_live_refresh(seconds) -> float:
     except (TypeError, ValueError):
         s = 60.0
     _LIVE_TTL_SEC = s
-    _OAUTH_USAGE_REFRESH_TTL = s
-    _OAUTH_USAGE_MIN_INTERVAL = s
+    _OAUTH_USAGE_REFRESH_TTL = max(_OAUTH_USAGE_FLOOR, s)
+    _OAUTH_USAGE_MIN_INTERVAL = max(_OAUTH_USAGE_FLOOR, s)
     _CODEX_LIVE_TTL = s
     return s
 
@@ -822,6 +828,45 @@ def _oauth_usage_forbidden_recently() -> bool:
     return True
 
 
+def _oauth_usage_backoff_remaining() -> float:
+    try:
+        d = json.loads(_OAUTH_USAGE_STATE.read_text(encoding="utf-8"))
+        return max(0.0, float(d.get("backoff_until", 0)) - time.time())
+    except Exception:
+        return 0.0
+
+
+def _note_oauth_usage_rate_limited() -> None:
+    """Double the wait each time the endpoint refuses us."""
+    try:
+        d = json.loads(_OAUTH_USAGE_STATE.read_text(encoding="utf-8"))
+    except Exception:
+        d = {}
+    prev = float(d.get("backoff_seconds", 0) or 0)
+    nxt = min(_OAUTH_USAGE_BACKOFF_MAX,
+              max(_OAUTH_USAGE_BACKOFF_MIN, prev * 2))
+    d["backoff_seconds"] = nxt
+    d["backoff_until"] = time.time() + nxt
+    try:
+        _OAUTH_USAGE_STATE.parent.mkdir(parents=True, exist_ok=True)
+        _OAUTH_USAGE_STATE.write_text(json.dumps(d), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _clear_oauth_usage_backoff() -> None:
+    try:
+        d = json.loads(_OAUTH_USAGE_STATE.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not (d.pop("backoff_until", None) or d.pop("backoff_seconds", None)):
+        return
+    try:
+        _OAUTH_USAGE_STATE.write_text(json.dumps(d), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _mark_oauth_usage_forbidden(token: str | None = None) -> None:
     try:
         _OAUTH_USAGE_STATE.parent.mkdir(parents=True, exist_ok=True)
@@ -905,7 +950,8 @@ def _try_oauth_usage(token: str) -> dict | None:
             _mark_oauth_usage_forbidden(token)
             return None
         if e.code == 429:
-            return _read_last_good_oauth_usage()
+            _note_oauth_usage_rate_limited()
+            return _read_last_good_oauth_usage(_OAUTH_USAGE_STALE_TTL)
         return None
     except Exception:
         return None
@@ -939,6 +985,7 @@ def _try_oauth_usage(token: str) -> dict | None:
             break
 
     out["fetched_at"] = time.time()
+    _clear_oauth_usage_backoff()
     _write_last_good_oauth_usage(out)
     return out
 
@@ -968,7 +1015,9 @@ def _fetch_live_rate_limits() -> dict | None:
     if not _oauth_usage_forbidden_recently():
         fable_extra = _read_last_good_oauth_usage(_OAUTH_USAGE_REFRESH_TTL)
         if fable_extra is None:
-            if desktop_tok and _oauth_usage_last_attempt_ago() >= _OAUTH_USAGE_MIN_INTERVAL:
+            if (desktop_tok
+                    and _oauth_usage_last_attempt_ago() >= _OAUTH_USAGE_MIN_INTERVAL
+                    and _oauth_usage_backoff_remaining() <= 0):
                 _mark_oauth_usage_attempt()
                 fable_extra = _try_oauth_usage(desktop_tok)
                 if fable_extra is _OAUTH_UNAUTHORIZED:

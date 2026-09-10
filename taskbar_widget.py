@@ -46,17 +46,39 @@ EMBED_GAP = 24          # px kept clear between the widget and the clock
 # initial guess (dark theme, transparency off). If the probe shows our
 # pixels never reach the screen, or the backdrop is too bright for the
 # additive model to stay legible, the widget falls back to float mode.
-TASKBAR_BG = "#111111"
 _CALIBRATION_STATE = None  # set to a Path by _calibration_state_path()
+
+DARK_PALETTE = {
+    "taskbar_bg": "#111111", "bg_bar": "#3a3a42",
+    "fg_label": "#e8e8ee", "fg_dim": "#9a9aa6",
+    "divider": "#33333a", "tile_fill": "#2a2a32", "tile_edge": "#454552",
+    "ok": "#3fbf6a", "warn": "#e8a828", "danger": "#dc3c3c",
+    "na": "#5a5a64", "fable": "#9b7cd6",   # violet, matches CodeZeno PR #49
+}
+# Light Windows 11 taskbars sit at roughly #f3f3f3; the accents are darkened
+# so they stay readable against it.
+LIGHT_PALETTE = {
+    "taskbar_bg": "#f3f3f3", "bg_bar": "#cfcfd6",
+    "fg_label": "#1b1b1f", "fg_dim": "#5c5c66",
+    "divider": "#c2c2ca", "tile_fill": "#e4e4e8", "tile_edge": "#b4b4bc",
+    "ok": "#1a7f43", "warn": "#8f5a00", "danger": "#b32222",
+    "na": "#9a9aa2", "fable": "#5f43a6",
+}
+
+THEME = "dark"
+TASKBAR_BG = DARK_PALETTE["taskbar_bg"]
 BG = TASKBAR_BG
-BG_BAR = "#3a3a42"
-FG_LABEL = "#e8e8ee"
-FG_DIM = "#9a9aa6"
-COLOR_OK = "#3fbf6a"
-COLOR_WARN = "#e8a828"
-COLOR_DANGER = "#dc3c3c"
-COLOR_NA = "#5a5a64"
-COLOR_FABLE = "#9b7cd6"  # violet, matches CodeZeno PR #49
+BG_BAR = DARK_PALETTE["bg_bar"]
+FG_LABEL = DARK_PALETTE["fg_label"]
+FG_DIM = DARK_PALETTE["fg_dim"]
+DIVIDER = DARK_PALETTE["divider"]
+TILE_FILL = DARK_PALETTE["tile_fill"]
+TILE_EDGE = DARK_PALETTE["tile_edge"]
+COLOR_OK = DARK_PALETTE["ok"]
+COLOR_WARN = DARK_PALETTE["warn"]
+COLOR_DANGER = DARK_PALETTE["danger"]
+COLOR_NA = DARK_PALETTE["na"]
+COLOR_FABLE = DARK_PALETTE["fable"]
 
 # Geometry is authored at 100% DPI and scaled up at startup. Embedding into
 # the taskbar makes this mandatory: a child of the (DPI-aware) taskbar gets
@@ -110,6 +132,40 @@ def _format_countdown(reset_epoch: float | int | None) -> str:
 ICON_PX = BASE_ICON_PX
 
 
+def system_uses_light_taskbar() -> bool:
+    """Windows keeps the taskbar/system shade separate from the app shade."""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        with key:
+            return bool(winreg.QueryValueEx(key, "SystemUsesLightTheme")[0])
+    except Exception:
+        return False
+
+
+def apply_theme(cfg: dict) -> str:
+    """Pick the palette for the current taskbar shade. `theme` in config.json
+    forces "light"/"dark"; "auto" follows Windows."""
+    global THEME, TASKBAR_BG, BG, BG_BAR, FG_LABEL, FG_DIM, DIVIDER
+    global TILE_FILL, TILE_EDGE
+    global COLOR_OK, COLOR_WARN, COLOR_DANGER, COLOR_NA, COLOR_FABLE
+    want = str(cfg.get("theme", "auto")).lower()
+    if want not in ("light", "dark"):
+        want = "light" if system_uses_light_taskbar() else "dark"
+    pal = LIGHT_PALETTE if want == "light" else DARK_PALETTE
+    THEME = want
+    raw_bg = str(cfg.get("taskbar_bg") or "auto")
+    TASKBAR_BG = pal["taskbar_bg"] if raw_bg.lower() == "auto" else raw_bg
+    BG = TASKBAR_BG
+    BG_BAR, FG_LABEL, FG_DIM = pal["bg_bar"], pal["fg_label"], pal["fg_dim"]
+    DIVIDER, TILE_FILL, TILE_EDGE = pal["divider"], pal["tile_fill"], pal["tile_edge"]
+    COLOR_OK, COLOR_WARN = pal["ok"], pal["warn"]
+    COLOR_DANGER, COLOR_NA, COLOR_FABLE = pal["danger"], pal["na"], pal["fable"]
+    return THEME
+
+
 def set_dpi_awareness() -> None:
     """Must run before the first Tk window exists."""
     try:
@@ -136,6 +192,7 @@ def init_scale(root, cfg: dict | None = None) -> float:
     def sc(v: float) -> int:
         return int(round(v * SCALE))
 
+    apply_theme(cfg or {})
     HEIGHT = int(round(BASE_HEIGHT * SCALE))
     ICON_PX = int(round(BASE_ICON_PX * SCALE))
     PAD_X, GAP_ICON, GAP = sc(8), sc(6), sc(3)
@@ -232,6 +289,44 @@ def _sample_screen(x: int, y: int) -> tuple[int, int, int] | None:
         return c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF
     except Exception:
         return None
+
+
+def session_locked() -> bool:
+    """True while the workstation is locked.
+
+    A locked session shows the Winlogon desktop, so a screen sample reads the
+    lock screen rather than our window — calibrating then concludes nonsense.
+    """
+    try:
+        u = ctypes.windll.user32
+        DESKTOP_SWITCHDESKTOP = 0x0100
+        h = u.OpenInputDesktop(0, False, DESKTOP_SWITCHDESKTOP)
+        if not h:
+            return True
+        u.CloseDesktop(h)
+        return False
+    except Exception:
+        return False
+
+
+def _point_belongs_to(hwnd: int, x: int, y: int) -> bool:
+    """True when the window under (x, y) is `hwnd` or one of its children."""
+    try:
+        u = ctypes.windll.user32
+
+        class _PT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+        u.WindowFromPoint.restype = ctypes.c_void_p
+        got = u.WindowFromPoint(_PT(int(x), int(y)))
+        for _ in range(8):
+            if not got:
+                return False
+            if int(got) == int(hwnd):
+                return True
+            got = u.GetParent(ctypes.c_void_p(got))
+        return False
+    except Exception:
+        return False
 
 
 def _classify_calibration(black: tuple | None, gray: tuple | None):
@@ -468,6 +563,16 @@ class TaskbarWidget:
 
     # --- runtime colour calibration -------------------------------
 
+    def _retry_embed(self) -> None:
+        if self.embedded or not self.wants_embed():
+            return
+        if self._embed():
+            self.relayout()
+            if self._bg_auto:
+                self.win.after(400, self._calibrate)
+        else:
+            self.win.after(300_000, self._retry_embed)
+
     def _probe_paint(self, color: str) -> None:
         self.canvas.delete("all")
         try:
@@ -492,6 +597,13 @@ class TaskbarWidget:
         compositor has time to show each frame.
         """
         if not self.embedded or self._calibrating or not self._visible:
+            return
+        pt = self._probe_point()
+        if session_locked() or pt is None or not _point_belongs_to(self._hwnd, *pt):
+            # Locked screen, or something sits over our slot. Measuring now
+            # would read someone else's pixels and wrongly conclude that the
+            # taskbar cannot show us, so wait and look again.
+            self.win.after(30_000, self._calibrate)
             return
         self._calibrating = True
         self._probe_paint("#000000")
@@ -520,6 +632,11 @@ class TaskbarWidget:
                     self._apply_colors()
                     self._place_initial()
                     self.redraw_last()
+                    if verdict == "invisible" and self.wants_embed():
+                        # A lock screen or a window over the strip looks the
+                        # same as a taskbar that cannot host us. Float now so
+                        # the bar is never missing, and look again later.
+                        self.win.after(300_000, self._retry_embed)
                 else:  # unknown — keep the configured guess
                     self._apply_colors()
                     self.redraw_last()
@@ -536,6 +653,13 @@ class TaskbarWidget:
     def _embed(self) -> bool:
         tb = _find_taskbar()
         if not tb or not self._hwnd:
+            return False
+        if THEME == "light":
+            # The taskbar composites a child ADDITIVELY over its own shade, so
+            # on a light strip nothing can be drawn darker than the background
+            # — no readable text is possible. Float over it instead, and skip
+            # the probes so they cannot leave marks on a light taskbar.
+            print("[widget] light taskbar — floating instead of embedding")
             return False
         try:
             u = ctypes.windll.user32
@@ -708,6 +832,13 @@ class TaskbarWidget:
             return self._visible
         return bool(self.win.winfo_viewable())
 
+    def retheme(self):
+        """Re-apply after the Windows shade changed: a light taskbar cannot host
+        the widget, so the mode may have to change too."""
+        self._bg_offset = _hex_to_rgb(TASKBAR_BG)
+        self._apply_mode()
+        self.relayout()
+
     def relayout(self):
         """Re-measure the bar after a settings change and put it back."""
         apply_layout(self.cfg)
@@ -796,8 +927,8 @@ class TaskbarWidget:
                 c.create_image(x0 + ICON_PX / 2, ic_y + ICON_PX / 2, image=icon_obj)
             else:
                 c.create_rectangle(x0, ic_y, x0 + ICON_PX, ic_y + ICON_PX,
-                                   fill=self._adj("#2a2a32"),
-                                   outline=self._adj("#454552"))
+                                   fill=self._adj(TILE_FILL),
+                                   outline=self._adj(TILE_EDGE))
                 c.create_text(x0 + ICON_PX / 2, ic_y + ICON_PX / 2,
                               text=fallback_letter, fill=self._adj(FG_LABEL),
                               font=("Segoe UI Semibold", 13))
@@ -870,7 +1001,7 @@ class TaskbarWidget:
 
         if show_claude and show_codex:
             c.create_line(x, ROW_Y_TOP, x, HEIGHT - ROW_Y_TOP,
-                          fill=self._adj("#33333a"))
+                          fill=self._adj(DIVIDER))
             x += pad_x
 
         codex_5h = codex.primary_pct if (codex.available and codex.has_primary) else None

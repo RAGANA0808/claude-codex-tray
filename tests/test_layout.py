@@ -75,3 +75,87 @@ def test_percentage_column_fits_three_digits():
         assert tw.TIME_W >= max(t.measure(s) for s in ("<1m", "now", "10d", "23h"))
     finally:
         root.destroy()
+
+
+# --- theme ------------------------------------------------------------
+
+def test_theme_can_be_forced():
+    assert tw.apply_theme({"theme": "light"}) == "light"
+    assert tw.TASKBAR_BG == tw.LIGHT_PALETTE["taskbar_bg"]
+    assert tw.apply_theme({"theme": "dark"}) == "dark"
+    assert tw.TASKBAR_BG == tw.DARK_PALETTE["taskbar_bg"]
+
+
+def test_auto_theme_follows_windows(monkeypatch):
+    monkeypatch.setattr(tw, "system_uses_light_taskbar", lambda: True)
+    assert tw.apply_theme({}) == "light"
+    monkeypatch.setattr(tw, "system_uses_light_taskbar", lambda: False)
+    assert tw.apply_theme({"theme": "auto"}) == "dark"
+
+
+def test_every_palette_key_is_applied():
+    for theme, pal in (("light", tw.LIGHT_PALETTE), ("dark", tw.DARK_PALETTE)):
+        tw.apply_theme({"theme": theme})
+        assert tw.BG == pal["taskbar_bg"] and tw.BG_BAR == pal["bg_bar"]
+        assert tw.FG_LABEL == pal["fg_label"] and tw.FG_DIM == pal["fg_dim"]
+        assert tw.DIVIDER == pal["divider"]
+        assert tw.TILE_FILL == pal["tile_fill"] and tw.TILE_EDGE == pal["tile_edge"]
+        assert tw.COLOR_OK == pal["ok"] and tw.COLOR_WARN == pal["warn"]
+        assert tw.COLOR_DANGER == pal["danger"] and tw.COLOR_NA == pal["na"]
+        assert tw.COLOR_FABLE == pal["fable"]
+
+
+def test_light_text_is_dark_enough_to_read():
+    """A light bar needs dark ink; the dark palette's would vanish on it."""
+    def lum(h):
+        r, g, b = tw._hex_to_rgb(h)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    bg = lum(tw.LIGHT_PALETTE["taskbar_bg"])
+    for key in ("fg_label", "fg_dim", "ok", "warn", "danger"):
+        assert bg - lum(tw.LIGHT_PALETTE[key]) > 60, key
+
+
+def test_taskbar_bg_override_still_wins():
+    tw.apply_theme({"theme": "dark", "taskbar_bg": "#010203"})
+    assert tw.TASKBAR_BG == "#010203"
+
+
+# --- calibration guards ------------------------------------------------
+
+def test_session_locked_returns_a_bool():
+    assert isinstance(tw.session_locked(), bool)
+
+
+def test_point_belongs_to_walks_up_to_the_owner(monkeypatch):
+    """A hit on a child counts as a hit on the window that owns it.
+
+    Screen hit-testing is the OS's job and is covered by running the real
+    widget; what matters here is that the ancestor walk finds the owner and
+    still terminates for an unrelated handle.
+    """
+    chain = {30: 20, 20: 10, 10: 0}          # child -> parent -> ... -> none
+
+    def parent(h):
+        v = h.value if hasattr(h, "value") else h
+        return chain.get(int(v or 0), 0)
+
+    class FakeUser32:
+        WindowFromPoint = staticmethod(lambda pt: 30)
+        GetParent = staticmethod(parent)
+
+    real = tw.ctypes.windll
+
+    class FakeWindll:
+        user32 = FakeUser32
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr(tw.ctypes, "windll", FakeWindll())
+    assert tw._point_belongs_to(30, 1, 1)    # the hit window itself
+    assert tw._point_belongs_to(10, 1, 1)    # an ancestor of it
+    assert not tw._point_belongs_to(99, 1, 1)
+
+
+def test_point_belongs_to_is_safe_on_a_dead_handle():
+    assert tw._point_belongs_to(0, 10, 10) is False

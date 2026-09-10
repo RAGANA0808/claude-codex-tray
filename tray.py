@@ -87,6 +87,12 @@ class App:
     def _redraw_widget(self):
         if self.widget is None:
             return
+        # Windows can switch light/dark while we run; pick the palette up again
+        # and rebuild only when it actually changed.
+        before = taskbar_widget.THEME
+        if taskbar_widget.apply_theme(self.cfg) != before:
+            print(f"[widget] taskbar theme -> {taskbar_widget.THEME}")
+            self.widget.retheme()
         snap = self._latest_snapshot()
         self.widget.render(snap, self.cfg)
 

@@ -30,12 +30,16 @@ def _font(px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 
 
 def make_tile(letter: str, accent: tuple, size: int = 64) -> Image.Image:
-    """Neutral tile: dark rounded square, accent ring, bold letter."""
+    """Neutral tile: accent ring and bold letter on a transparent ground.
+
+    Transparent rather than filled so the same icon reads on both a dark and a
+    light taskbar.
+    """
     s4 = size * 4  # draw at 4x then downscale for smooth edges
     img = Image.new("RGBA", (s4, s4), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     r = s4 // 5
-    d.rounded_rectangle((8, 8, s4 - 9, s4 - 9), radius=r, fill=TILE_BG,
+    d.rounded_rectangle((8, 8, s4 - 9, s4 - 9), radius=r, fill=None,
                         outline=accent, width=s4 // 22)
     f = _font(int(s4 * 0.58))
     bbox = d.textbbox((0, 0), letter, font=f)

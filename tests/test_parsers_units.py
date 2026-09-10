@@ -143,3 +143,61 @@ def test_desktop_token_expiry_margin(tmp_path, monkeypatch):
     assert tok == "t" and not expired
     tok, expired = parsers._get_desktop_access_token()
     assert expired
+
+
+# --- the usage endpoint is rate limited harder than /v1/messages -------
+
+def test_usage_endpoint_keeps_its_own_floor():
+    """Lowering the general refresh must not hammer /api/oauth/usage."""
+    try:
+        parsers.set_live_refresh(15)
+        assert parsers._LIVE_TTL_SEC == 15
+        assert parsers._OAUTH_USAGE_MIN_INTERVAL >= parsers._OAUTH_USAGE_FLOOR
+        assert parsers._OAUTH_USAGE_REFRESH_TTL >= parsers._OAUTH_USAGE_FLOOR
+    finally:
+        parsers.set_live_refresh(60)
+
+
+def test_429_backs_off_and_doubles(isolated_cache, monkeypatch):
+    def raise429(req, timeout=0):
+        raise _http_error(429)
+    monkeypatch.setattr(parsers.urllib.request, "urlopen", raise429)
+
+    assert parsers._oauth_usage_backoff_remaining() == 0
+    parsers._try_oauth_usage("tok")
+    first = parsers._oauth_usage_backoff_remaining()
+    assert first >= parsers._OAUTH_USAGE_BACKOFF_MIN - 1
+
+    parsers._try_oauth_usage("tok")
+    second = parsers._oauth_usage_backoff_remaining()
+    assert second > first          # refused again -> wait longer
+
+
+def test_backoff_is_capped(isolated_cache, monkeypatch):
+    def raise429(req, timeout=0):
+        raise _http_error(429)
+    monkeypatch.setattr(parsers.urllib.request, "urlopen", raise429)
+    for _ in range(12):
+        parsers._try_oauth_usage("tok")
+    assert parsers._oauth_usage_backoff_remaining() <= parsers._OAUTH_USAGE_BACKOFF_MAX + 1
+
+
+def test_success_clears_the_backoff(isolated_cache, monkeypatch):
+    parsers._note_oauth_usage_rate_limited()
+    assert parsers._oauth_usage_backoff_remaining() > 0
+    monkeypatch.setattr(parsers.urllib.request, "urlopen",
+                        lambda req, timeout=0: _FakeResponse(OAUTH_BODY))
+    assert parsers._try_oauth_usage("tok")["fable_pct"] == 7.0
+    assert parsers._oauth_usage_backoff_remaining() == 0
+
+
+def test_429_still_serves_the_last_good_reading(isolated_cache, monkeypatch):
+    """Fable must not blink out just because the endpoint is busy."""
+    monkeypatch.setattr(parsers.urllib.request, "urlopen",
+                        lambda req, timeout=0: _FakeResponse(OAUTH_BODY))
+    parsers._try_oauth_usage("tok")
+    def raise429(req, timeout=0):
+        raise _http_error(429)
+    monkeypatch.setattr(parsers.urllib.request, "urlopen", raise429)
+    out = parsers._try_oauth_usage("tok")
+    assert out is not None and out["fable_pct"] == 7.0
