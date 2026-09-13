@@ -467,13 +467,16 @@ class TaskbarWidget:
                  on_right_click_menu: Callable[[int, int], None],
                  save_position: Callable[[int, int], None],
                  save_taskbar_offset: Callable[[int], None] | None = None,
-                 on_taskbar_lost: Callable[[], None] | None = None):
+                 on_taskbar_lost: Callable[[], None] | None = None,
+                 on_embed_refused: Callable[[str], None] | None = None):
         self.cfg = cfg
         self.on_double_click = on_double_click
         self.on_right_click_menu = on_right_click_menu
         self.save_position = save_position
         self.save_taskbar_offset = save_taskbar_offset
         self.on_taskbar_lost = on_taskbar_lost
+        self.on_embed_refused = on_embed_refused
+        self.embed_verdict = ""
         self.embedded = False
         self._taskbar = 0
         self._visible = True
@@ -639,6 +642,9 @@ class TaskbarWidget:
                     # This taskbar can't show us legibly — float instead.
                     print(f"[widget] embed calibration: {verdict} — "
                           "falling back to float mode")
+                    self.embed_verdict = verdict
+                    if self.on_embed_refused:
+                        self.on_embed_refused(verdict)
                     self._unembed()
                     self._apply_colors()
                     self._place_initial()
@@ -665,19 +671,20 @@ class TaskbarWidget:
         tb = _find_taskbar()
         if not tb or not self._hwnd:
             return False
-        if THEME == "light":
-            # The taskbar composites a child ADDITIVELY over its own shade, so
-            # on a light strip nothing can be drawn darker than the background
-            # — no readable text is possible. Float over it instead, and skip
-            # the probes so they cannot leave marks on a light taskbar.
-            print("[widget] light taskbar — floating instead of embedding")
-            return False
         try:
             u = ctypes.windll.user32
             style = u.GetWindowLongW(self._hwnd, _GWL_STYLE) & 0xFFFFFFFF
             u.SetWindowLongW(self._hwnd, _GWL_STYLE,
                              _i32((style & ~_WS_POPUP) | _WS_CHILD))
-            if not u.SetParent(self._hwnd, tb):
+            # SetParent returns the PREVIOUS parent, which is 0 for a window
+            # that had none — a success that reads as failure. Confirm by
+            # asking who the parent is now.
+            u.SetParent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            u.SetParent.restype = ctypes.c_void_p
+            u.GetParent.argtypes = [ctypes.c_void_p]
+            u.GetParent.restype = ctypes.c_void_p
+            u.SetParent(self._hwnd, tb)
+            if int(u.GetParent(self._hwnd) or 0) != int(tb):
                 return False
             self._taskbar = tb
             self.embedded = True

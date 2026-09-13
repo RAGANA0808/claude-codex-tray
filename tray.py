@@ -409,7 +409,22 @@ class App:
             save_position=self._save_widget_position,
             save_taskbar_offset=self._save_widget_offset,
             on_taskbar_lost=self._on_taskbar_lost,
+            on_embed_refused=self._on_embed_refused,
         )
+
+    def _on_embed_refused(self, verdict: str):
+        """Embedding was measured to be impossible here — the toggle would
+        otherwise just flip back with no explanation."""
+        why = {
+            "invisible": "タスクバーがウィジェットの描画を隠しています",
+            "too-bright": "タスクバーの色が明るく、埋め込むと文字が読めません",
+        }.get(verdict, verdict)
+        try:
+            self.tray.notify(
+                f"タスクバーに埋め込めないため、帯の上に重ねて表示します（{why}）",
+                "Claude / Codex Usage")
+        except Exception:
+            pass
 
     def _on_taskbar_lost(self):
         """explorer.exe restarted: the taskbar destroyed our child window.
