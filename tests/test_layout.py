@@ -159,3 +159,46 @@ def test_point_belongs_to_walks_up_to_the_owner(monkeypatch):
 
 def test_point_belongs_to_is_safe_on_a_dead_handle():
     assert tw._point_belongs_to(0, 10, 10) is False
+
+
+# --- the calibration probe must not become the background --------------
+
+def test_probe_box_is_small_and_inside_the_bar():
+    tw.apply_layout({})
+    x0, y0, x1, y1 = tw.TaskbarWidget._probe_box(None)   # uses module geometry only
+    assert 0 < x0 < x1 < tw.WIDTH
+    assert 0 < y0 < y1 < tw.HEIGHT
+    assert (x1 - x0) <= tw.WIDTH // 4      # a patch, not the whole bar
+
+
+def test_probe_draws_a_patch_and_leaves_the_background_alone():
+    """A probe that recoloured the whole canvas burned a grey block into the
+    taskbar whenever calibration was interrupted."""
+    tk = pytest.importorskip("tkinter")
+    import types
+    try:
+        root = tk.Tk()
+    except Exception:
+        pytest.skip("no display for Tk")
+    try:
+        root.withdraw()
+        tw.init_scale(root, {})
+        canvas = tk.Canvas(root, width=tw.WIDTH, height=tw.HEIGHT)
+        w = types.SimpleNamespace(canvas=canvas, win=root, embedded=True,
+                                  _bg_offset=tw._hex_to_rgb(tw.TASKBAR_BG))
+        w._adj = lambda c: tw.TaskbarWidget._adj(w, c)
+        w._apply_colors = lambda: tw.TaskbarWidget._apply_colors(w)
+        w._probe_box = lambda: tw.TaskbarWidget._probe_box(w)
+
+        tw.TaskbarWidget._probe_paint(w, "#808080")
+        assert str(canvas["bg"]).lower() != "#808080"
+        assert str(canvas["bg"]).lower() == w._adj(tw.BG).lower()
+        assert len(canvas.find_all()) == 1        # just the patch
+
+        # and blanking puts the background back, whatever the probe left
+        canvas.configure(bg="#808080")
+        tw.TaskbarWidget._blank(w)
+        assert str(canvas["bg"]).lower() == w._adj(tw.BG).lower()
+        assert canvas.find_all() == ()
+    finally:
+        root.destroy()

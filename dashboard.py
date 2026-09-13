@@ -197,7 +197,17 @@ class Dashboard:
         from config import claude_plan_limit_usd
         limit = claude_plan_limit_usd(self.cfg)
         plan_name = self.cfg.get("claude_plan", "?")
-        if cc.available:
+        if getattr(cc, "needs_login", False):
+            # The widget only has room for a "!" — say what to do about it here.
+            self.claude_plan.config(
+                text=("★ Claude の認証が切れています（ウィジェットの ! はこれ）\n"
+                      "PowerShell で  claude auth login  を実行してください。\n"
+                      "直らない場合は、通知領域アイコンの右クリック → "
+                      "「診断情報を表示」の内容をご確認ください。"))
+            self._set_bar("claude_5h", None, 0)
+            self._set_bar("claude_week", None, 0)
+            self.claude_models.config(text=cc.note)
+        elif cc.available:
             is_estimate = cc.note.startswith("estimate")
             model_lbl = cc.model or "Claude"
             if is_estimate:

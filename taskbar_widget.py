@@ -573,11 +573,22 @@ class TaskbarWidget:
         else:
             self.win.after(300_000, self._retry_embed)
 
+    def _probe_box(self) -> tuple[int, int, int, int]:
+        """A small patch in the middle of the bar.
+
+        The probe used to recolour the whole widget, so an interrupted
+        calibration burned a bar-wide grey block into the taskbar. A patch
+        bounds that to a few pixels.
+        """
+        cx, cy = WIDTH // 2, HEIGHT // 2
+        h = max(4, int(round(6 * SCALE)))
+        return (cx - h, cy - h, cx + h, cy + h)
+
     def _probe_paint(self, color: str) -> None:
-        self.canvas.delete("all")
         try:
-            self.win.configure(bg=color)
-            self.canvas.configure(bg=color)
+            self.canvas.delete("all")
+            self._apply_colors()
+            self.canvas.create_rectangle(self._probe_box(), fill=color, outline="")
             self.win.update_idletasks()
         except tk.TclError:
             pass
@@ -866,6 +877,9 @@ class TaskbarWidget:
             return
         try:
             self.canvas.delete("all")
+            # Calibration repaints the background, so restore it here rather
+            # than trusting whatever colour the canvas was left holding.
+            self._apply_colors()
             self.win.update_idletasks()
         except tk.TclError:
             pass
