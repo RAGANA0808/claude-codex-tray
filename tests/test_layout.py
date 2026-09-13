@@ -184,11 +184,12 @@ def test_probe_draws_a_patch_and_leaves_the_background_alone():
         root.withdraw()
         tw.init_scale(root, {})
         canvas = tk.Canvas(root, width=tw.WIDTH, height=tw.HEIGHT)
-        w = types.SimpleNamespace(canvas=canvas, win=root, embedded=True,
+        w = types.SimpleNamespace(canvas=canvas, win=root, embedded=True, cfg={},
                                   _bg_offset=tw._hex_to_rgb(tw.TASKBAR_BG))
         w._adj = lambda c: tw.TaskbarWidget._adj(w, c)
         w._apply_colors = lambda: tw.TaskbarWidget._apply_colors(w)
         w._probe_box = lambda: tw.TaskbarWidget._probe_box(w)
+        w.float_is_transparent = lambda: tw.TaskbarWidget.float_is_transparent(w)
 
         tw.TaskbarWidget._probe_paint(w, "#808080")
         assert str(canvas["bg"]).lower() != "#808080"
@@ -202,3 +203,21 @@ def test_probe_draws_a_patch_and_leaves_the_background_alone():
         assert canvas.find_all() == ()
     finally:
         root.destroy()
+
+
+# --- floating over a taskbar we cannot match ---------------------------
+
+def test_float_drops_its_background_but_embedded_does_not():
+    """A translucent taskbar is tinted by the wallpaper, so no fixed colour can
+    match it; the floating bar shows the real strip through instead."""
+    import types
+    w = types.SimpleNamespace(embedded=False, cfg={})
+    assert tw.TaskbarWidget.float_is_transparent(w)
+    w.embedded = True
+    assert not tw.TaskbarWidget.float_is_transparent(w)   # embedding composites
+
+
+def test_float_transparency_can_be_switched_off():
+    import types
+    w = types.SimpleNamespace(embedded=False, cfg={"float_transparent": False})
+    assert not tw.TaskbarWidget.float_is_transparent(w)

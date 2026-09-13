@@ -718,9 +718,9 @@ def start_interactive_login() -> bool:
                    "-NoExit", "-File", str(claude_exe), "auth", "login"]
         else:
             # Passed as ONE string: a list would make Python re-quote the inner
-            # quotes and cmd would reject the path. `pause` keeps the window up
-            # so the result stays readable.
-            cmd = f'cmd.exe /c ""{claude_exe}" auth login & echo. & pause"'
+            # quotes and cmd would reject the path. `|| pause` holds the window
+            # open only when sign-in fails; on success it closes itself.
+            cmd = f'cmd.exe /c ""{claude_exe}" auth login || pause"'
         subprocess.Popen(cmd, cwd=str(Path.home()),
                          creationflags=_CREATE_NEW_CONSOLE)
         _log_cli_refresh("interactive login launched")

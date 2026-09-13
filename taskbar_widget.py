@@ -541,11 +541,24 @@ class TaskbarWidget:
         o = self._bg_offset
         return _rgb_to_hex((max(0, r - o[0]), max(0, g - o[1]), max(0, b - o[2])))
 
+    def float_is_transparent(self) -> bool:
+        return (not self.embedded
+                and bool(self.cfg.get("float_transparent", True)))
+
     def _apply_colors(self):
         bg = self._adj(BG)
         try:
             self.win.configure(bg=bg)
             self.canvas.configure(bg=bg)
+        except tk.TclError:
+            pass
+        # A floating bar cannot match a taskbar that is tinted by the
+        # wallpaper, so drop the background entirely and let the real strip
+        # show through. Keyed on our own background colour, so anti-aliased
+        # edges fade into exactly the shade they would have blended with.
+        try:
+            self.win.wm_attributes(
+                "-transparentcolor", bg if self.float_is_transparent() else "")
         except tk.TclError:
             pass
 
@@ -1012,6 +1025,12 @@ class TaskbarWidget:
             if not fable_on:
                 fable_pct = 0.0
                 fable_reset = None
+        if self.float_is_transparent():
+            # Transparent pixels pass clicks through, so leave something
+            # solid to grab the bar by.
+            c.create_rectangle(0, row_y_top, max(2, sc(3)), HEIGHT - row_y_top,
+                               fill=self._adj(FG_DIM), outline="")
+
         x = pad_x
         if show_claude:
             draw_side(x, self._icon_claude, "C", claude_5h, claude_7d,
