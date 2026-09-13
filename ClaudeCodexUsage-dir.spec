@@ -1,5 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec — single-file, windowed (no console) tray widget."""
+"""PyInstaller spec — FOLDER build (no self-extraction).
+
+Shipped alongside the single-file exe because a one-file PyInstaller
+binary unpacks itself at startup, which antivirus heuristics routinely
+flag. This build has nothing to unpack."""
 import os
 
 block_cipher = None
@@ -47,16 +51,13 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='ClaudeCodexUsage',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -65,4 +66,14 @@ exe = EXE(
     entitlements_file=None,
     icon='app-icon.ico',
     version='version_info.txt',
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    name='ClaudeCodexUsage',
 )

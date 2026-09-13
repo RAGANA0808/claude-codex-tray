@@ -36,13 +36,26 @@ jobs:
       - name: Generate icons
         run: python make_icon.py
 
-      - name: Build exe
+      - name: Build single-file exe
         run: pyinstaller ClaudeCodexUsage.spec --noconfirm --clean
 
-      - name: Compute checksum
+      # A one-file build unpacks itself at startup, which antivirus heuristics
+      # routinely flag. The folder build has nothing to unpack, so it is shipped
+      # as an alternative for anyone whose scanner blocks the single file.
+      - name: Build folder version
+        run: pyinstaller ClaudeCodexUsage-dir.spec --noconfirm
+
+      - name: Zip the folder version
+        run: Compress-Archive -Path dist/ClaudeCodexUsage -DestinationPath dist/ClaudeCodexUsage-folder.zip
+
+      - name: Compute checksums
         run: |
-          $hash = (Get-FileHash dist/ClaudeCodexUsage.exe -Algorithm SHA256).Hash.ToLower()
-          "$hash  ClaudeCodexUsage.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
+          $lines = @()
+          foreach ($f in 'ClaudeCodexUsage.exe', 'ClaudeCodexUsage-folder.zip') {
+            $hash = (Get-FileHash "dist/$f" -Algorithm SHA256).Hash.ToLower()
+            $lines += "$hash  $f"
+          }
+          $lines | Out-File -Encoding ascii dist/SHA256SUMS.txt
           Get-Content dist/SHA256SUMS.txt
 
       # Direct pushes to main produce no PRs, so GitHub's generated notes are
@@ -69,6 +82,8 @@ jobs:
             echo '**「Windows によって PC が保護されました」と出る場合**: コード署名をしていないため、初回起動時に SmartScreen の警告が出ます。異常ではありません。「詳細情報」（左上の小さいリンク）→「実行」で起動できます。次回からは出ません。'
             echo
             echo '**検証**: ダウンロード後、PowerShell で `Get-FileHash ClaudeCodexUsage.exe -Algorithm SHA256` を実行し、`SHA256SUMS.txt` の値と一致することを確認してください。exe は GitHub Actions が公開ソースから自動ビルドしたものです。'
+            echo
+            echo '**ウイルス対策ソフトに止められる場合**: 署名のない PyInstaller 製の exe は誤検知されることがあります。その場合は `ClaudeCodexUsage-folder.zip` をお使いください。展開して中の `ClaudeCodexUsage.exe` を実行します（起動時の自己展開がないため誤検知されにくい形式です）。'
           } > CHANGES.md
           cat CHANGES.md
 
@@ -77,6 +92,7 @@ jobs:
         with:
           files: |
             dist/ClaudeCodexUsage.exe
+            dist/ClaudeCodexUsage-folder.zip
             dist/SHA256SUMS.txt
           generate_release_notes: true
           body_path: CHANGES.md

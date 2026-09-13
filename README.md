@@ -24,6 +24,18 @@ the config keys and code comments are in English.*
 1. [Releases](../../releases) から `ClaudeCodexUsage.exe` をダウンロード
 2. 好きなフォルダに置いてダブルクリック
 
+> **ウイルス対策ソフトに止められる場合**
+> 署名のない PyInstaller 製の exe は誤検知されることがあります（単一ファイル版は
+> 起動時に自分を展開する形式のため、その挙動が検知規則に触れます）。
+> Release には**フォルダ版** `ClaudeCodexUsage-folder.zip` も置いてあります。
+> 展開して中の `ClaudeCodexUsage.exe` を実行してください。自己展開がないぶん
+> 誤検知されにくい形式です。
+>
+> どちらも GitHub Actions が公開ソースから自動ビルドしており、`SHA256SUMS.txt`
+> で改ざんがないことを確認できます。中身を確かめたい場合は
+> [VirusTotal](https://www.virustotal.com/) へアップロードすると複数エンジンの
+> 判定を見られます。
+
 前提条件は **Claude Code がインストールされていること** だけです。未サインインの
 場合は、通知領域アイコンの右クリック →「Claude にログイン…」から行えます。
 Codex は使っていれば自動で表示、無ければ「—」になります。
@@ -61,6 +73,7 @@ cd <クローンしたフォルダ>
 | スタートアップ登録 / 解除 | `.\install-startup.bat` / `.\uninstall-startup.bat` |
 | statusLine 連携 / 解除 | `.\install-statusline.ps1` / `.\uninstall-statusline.ps1` |
 | exe をビルド | `.\build.ps1` → `dist\ClaudeCodexUsage.exe` |
+| フォルダ版をビルド | `pyinstaller ClaudeCodexUsage-dir.spec --noconfirm` |
 
 ## セキュリティとプライバシー
 
@@ -272,7 +285,9 @@ CI（GitHub Actions）が push / PR ごとに lint・テスト・exe ビルド�
 | `dashboard.py`    | ダブルクリックで開く詳細ウィンドウ |
 | `diagnostics.py`  | 診断レポート生成（数値が出ないときの自己診断）|
 | `make_icon.py`    | アイコン一式（app-*.png / app-icon.ico）を生成 |
-| `ClaudeCodexUsage.spec` / `build.ps1` | 配布用 exe のビルド |
+| `ClaudeCodexUsage.spec` / `build.ps1` | 配布用 exe のビルド（単一ファイル）|
+| `ClaudeCodexUsage-dir.spec` | フォルダ版のビルド（誤検知対策）|
+| `version_info.txt` | exe に埋め込む製品情報 |
 | `config.py`       | 設定の読み込みと既定値 |
 | `tests/`          | ユニットテスト（CI で実行）|
 | `smoke_check.py`  | 実データに対する手動スモークチェック |
