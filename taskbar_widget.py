@@ -22,6 +22,7 @@ _WS_EX_TOPMOST = 0x00000008
 _WS_CHILD = 0x40000000
 _WS_POPUP = 0x80000000
 _HWND_TOP = 0
+_HWND_TOPMOST = -1
 _SWP_NOSIZE = 0x0001
 _SWP_NOMOVE = 0x0002
 _SWP_NOACTIVATE = 0x0010
@@ -36,6 +37,7 @@ _SW_SHOWNOACTIVATE = 4
 TASKBAR_CLASS = "Shell_TrayWnd"
 TRAY_NOTIFY_CLASS = "TrayNotifyWnd"
 EMBED_GAP = 24          # px kept clear between the widget and the clock
+FLOAT_RAISE_MS = 250    # how often a floating bar re-claims the top slot
 
 # The Windows 11 taskbar composites an embedded child window ADDITIVELY over
 # its own backdrop: every pixel we draw comes out brighter by the backdrop's
@@ -329,6 +331,32 @@ def _point_belongs_to(hwnd: int, x: int, y: int) -> bool:
         return False
 
 
+def sample_taskbar_beside(rect: tuple[int, int, int, int] | None) -> str | None:
+    """The taskbar colour just outside `rect`, as a hex string.
+
+    A taskbar with transparency effects is tinted by the wallpaper, so it
+    has no fixed colour to hard-code. Reading the strip next to the bar is
+    the only way a solid background can match it.
+    """
+    if not rect:
+        return None
+    tb = _window_rect(_find_taskbar())
+    if not tb:
+        return None
+    y = (rect[1] + rect[3]) // 2
+    picks = []
+    for x in (rect[0] - 10, rect[0] - 20, rect[2] + 10, rect[2] + 20):
+        if not (tb[0] + 2 <= x <= tb[2] - 2):
+            continue
+        got = _sample_screen(x, y)
+        if got:
+            picks.append(got)
+    if not picks:
+        return None
+    picks.sort(key=sum)
+    return _rgb_to_hex(picks[len(picks) // 2])
+
+
 def _classify_calibration(black: tuple | None, gray: tuple | None):
     """Decide what the two probe samples mean.
 
@@ -486,6 +514,7 @@ class TaskbarWidget:
                            else _hex_to_rgb(raw_bg))
         self._calibrating = False
         self._pending_right = 0
+        self._matched_bg: str | None = None
         self._drag_grab = 0
 
         self.win = tk.Toplevel(root)
@@ -543,10 +572,21 @@ class TaskbarWidget:
 
     def float_is_transparent(self) -> bool:
         return (not self.embedded
-                and bool(self.cfg.get("float_transparent", True)))
+                and bool(self.cfg.get("float_transparent", False)))
+
+    def _float_background(self) -> str:
+        """What a floating bar should paint behind itself."""
+        if self.embedded or not self.cfg.get("float_match_taskbar", True):
+            return BG
+        if session_locked():
+            return self._matched_bg or BG   # a lock screen is not the taskbar
+        got = sample_taskbar_beside(_window_rect(self._hwnd))
+        if got:
+            self._matched_bg = got
+        return self._matched_bg or BG
 
     def _apply_colors(self):
-        bg = self._adj(BG)
+        bg = self._adj(BG) if self.embedded else self._float_background()
         try:
             self.win.configure(bg=bg)
             self.canvas.configure(bg=bg)
@@ -791,11 +831,23 @@ class TaskbarWidget:
                                    _SWP_NOACTIVATE | _SWP_NOSIZE | _SWP_NOMOVE)
             else:
                 self.win.wm_attributes("-topmost", True)
+                # A layered (transparent) window loses the z-order fight with
+                # the taskbar even while it still carries WS_EX_TOPMOST, and Tk
+                # skips the raise when the attribute is already set. Ask for the
+                # top slot outright.
+                u = ctypes.windll.user32
+                u.SetWindowPos(self._hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
+                               _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE)
         except tk.TclError:
             return
         except Exception:
             pass
-        self.win.after(4000, self._reassert_after)
+        # The Windows 11 taskbar re-asserts its own topmost slot, which pushes a
+        # floating bar underneath it within a second or two — it was blinking in
+        # and out at exactly the old 4s re-assert interval. Inside the taskbar
+        # nothing competes for the slot, so that case stays slow.
+        self.win.after(4000 if self.embedded else FLOAT_RAISE_MS,
+                       self._reassert_after)
 
     def _on_press(self, ev):
         if self.embedded:
@@ -935,6 +987,10 @@ class TaskbarWidget:
         def sc(v: float) -> int:
             return int(round(v * SCALE))
 
+        if not self.embedded:
+            # Re-match on every redraw: the strip's tint moves with the
+            # wallpaper and with whatever is behind it.
+            self._apply_colors()
         pad_x, gap_icon = PAD_X, GAP_ICON
         bar_h, bar_w = BAR_H, BAR_W
         row_y_top = ROW_Y_TOP

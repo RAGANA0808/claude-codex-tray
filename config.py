@@ -55,10 +55,14 @@ DEFAULTS = {
     # floats over it in the light palette instead.
     "theme": "auto",
 
-    # When the bar floats (it could not be embedded), drop its background so
-    # the real taskbar shows through — the only way to match a strip that is
-    # tinted by the wallpaper. Set false for a solid background instead.
-    "float_transparent": True,
+    # When the bar floats (it could not be embedded), paint its background in
+    # the colour sampled from the taskbar beside it, so it matches a strip
+    # that is tinted by the wallpaper.
+    "float_match_taskbar": True,
+    # Alternative: drop the background entirely and show the real taskbar
+    # through it. Looks perfect but makes the window layered, and a layered
+    # window can lose the z-order fight with the taskbar and blink out.
+    "float_transparent": False,
 
     # Which halves of the bar to draw. Turning one off narrows the widget
     # instead of leaving a gap. Both off is treated as both on.

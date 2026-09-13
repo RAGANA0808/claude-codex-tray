@@ -207,17 +207,47 @@ def test_probe_draws_a_patch_and_leaves_the_background_alone():
 
 # --- floating over a taskbar we cannot match ---------------------------
 
-def test_float_drops_its_background_but_embedded_does_not():
-    """A translucent taskbar is tinted by the wallpaper, so no fixed colour can
-    match it; the floating bar shows the real strip through instead."""
+def test_transparency_is_opt_in():
+    """Transparency looks perfect but makes the window layered, and a layered
+    window can lose the z-order fight with the taskbar and blink out."""
     import types
     w = types.SimpleNamespace(embedded=False, cfg={})
+    assert not tw.TaskbarWidget.float_is_transparent(w)
+    w.cfg = {"float_transparent": True}
     assert tw.TaskbarWidget.float_is_transparent(w)
     w.embedded = True
     assert not tw.TaskbarWidget.float_is_transparent(w)   # embedding composites
 
 
-def test_float_transparency_can_be_switched_off():
+def test_float_background_uses_the_sampled_taskbar_colour(monkeypatch):
+    """A taskbar with transparency effects has no fixed colour to hard-code."""
     import types
-    w = types.SimpleNamespace(embedded=False, cfg={"float_transparent": False})
-    assert not tw.TaskbarWidget.float_is_transparent(w)
+    monkeypatch.setattr(tw, "session_locked", lambda: False)
+    monkeypatch.setattr(tw, "_window_rect", lambda h: (0, 0, 10, 10))
+    monkeypatch.setattr(tw, "sample_taskbar_beside", lambda r: "#dfdae1")
+    w = types.SimpleNamespace(embedded=False, cfg={}, _hwnd=1, _matched_bg=None)
+    assert tw.TaskbarWidget._float_background(w) == "#dfdae1"
+    assert w._matched_bg == "#dfdae1"      # remembered for when sampling fails
+
+
+def test_float_background_keeps_the_last_match_while_locked(monkeypatch):
+    import types
+    monkeypatch.setattr(tw, "session_locked", lambda: True)
+    w = types.SimpleNamespace(embedded=False, cfg={}, _hwnd=1, _matched_bg="#dfdae1")
+    # a lock screen is not the taskbar, so it must not be sampled
+    monkeypatch.setattr(tw, "sample_taskbar_beside",
+                        lambda r: pytest.fail("must not sample while locked"))
+    assert tw.TaskbarWidget._float_background(w) == "#dfdae1"
+
+
+def test_float_matching_can_be_switched_off():
+    import types
+    w = types.SimpleNamespace(embedded=False, cfg={"float_match_taskbar": False},
+                              _hwnd=1, _matched_bg=None)
+    assert tw.TaskbarWidget._float_background(w) == tw.BG
+
+
+def test_embedded_never_samples_the_strip():
+    import types
+    w = types.SimpleNamespace(embedded=True, cfg={}, _hwnd=1, _matched_bg=None)
+    assert tw.TaskbarWidget._float_background(w) == tw.BG
