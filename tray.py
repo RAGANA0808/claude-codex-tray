@@ -102,8 +102,8 @@ class App:
             self._notified_needs_login = True
             try:
                 self.tray.notify(
-                    "認証の有効期限が切れました。PowerShell で "
-                    "claude auth login を実行してください。",
+                    "Claude の認証が切れました。通知領域アイコンを右クリック → "
+                    "「Claude にログイン…」からサインインしてください。",
                     "Claude / Codex Usage",
                 )
             except Exception:
@@ -145,6 +145,7 @@ class App:
             MenuItem("ダッシュボードを開く", self._on_open_dashboard, default=True),
             MenuItem("ウィジェットを表示", self._on_toggle_widget,
                      checked=lambda _i: self._widget_visible),
+            MenuItem("Claude にログイン…", self._on_claude_login),
             MenuItem("表示設定…", self._on_open_settings),
             MenuItem("タスクバーに埋め込む", self._on_toggle_embed,
                      checked=lambda _i: self._embed_active()),
@@ -233,6 +234,28 @@ class App:
                 self._widget_visible = True
                 self._redraw_widget()
         self.root.after(0, toggle)
+
+    def _on_claude_login(self, *_):
+        """Hand over to the Claude CLI's sign-in, in its own window."""
+        def go():
+            if parsers.start_interactive_login():
+                try:
+                    self.tray.notify(
+                        "サインイン画面を開きました。画面の案内に従って"
+                        "完了してください。数値は自動で戻ります。",
+                        "Claude / Codex Usage")
+                except Exception:
+                    pass
+                self._notified_needs_login = False
+            else:
+                try:
+                    self.tray.notify(
+                        "Claude Code が見つかりません。先に Claude Code を"
+                        "インストールしてください。",
+                        "Claude / Codex Usage")
+                except Exception:
+                    pass
+        threading.Thread(target=go, daemon=True).start()
 
     def _on_open_settings(self, *_):
         if self.root is None:
@@ -389,6 +412,7 @@ class App:
         m.add_command(label="今すぐ更新", command=lambda: threading.Thread(target=self._refresh_once, daemon=True).start())
         m.add_separator()
         m.add_command(label="ウィジェットを隠す", command=self._on_toggle_widget)
+        m.add_command(label="Claude にログイン…", command=self._on_claude_login)
         m.add_command(label="表示設定…", command=self._on_open_settings)
         m.add_command(label="タスクバーに埋め込む / 解除", command=self._on_toggle_embed)
         m.add_command(label="位置を既定に戻す", command=self._on_recenter_widget)

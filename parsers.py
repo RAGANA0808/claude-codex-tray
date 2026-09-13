@@ -697,6 +697,58 @@ def _clear_needs_login() -> None:
         pass
 
 
+_CREATE_NEW_CONSOLE = 0x00000010
+
+
+def start_interactive_login() -> bool:
+    """Open the Claude CLI's own sign-in in a visible console.
+
+    Telling someone who downloaded an exe to open PowerShell and type a
+    command is not a fix. The credentials still never pass through this
+    app: the official CLI runs the whole flow and stores the result.
+    """
+    import subprocess
+    claude_exe = _find_claude_cli()
+    if claude_exe is None:
+        _log_cli_refresh("interactive login: claude CLI not found")
+        return False
+    try:
+        if claude_exe.suffix.lower() == ".ps1":
+            cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                   "-NoExit", "-File", str(claude_exe), "auth", "login"]
+        else:
+            # Passed as ONE string: a list would make Python re-quote the inner
+            # quotes and cmd would reject the path. `pause` keeps the window up
+            # so the result stays readable.
+            cmd = f'cmd.exe /c ""{claude_exe}" auth login & echo. & pause"'
+        subprocess.Popen(cmd, cwd=str(Path.home()),
+                         creationflags=_CREATE_NEW_CONSOLE)
+        _log_cli_refresh("interactive login launched")
+        return True
+    except Exception as e:
+        _log_cli_refresh(f"interactive login failed to start: {e}")
+        return False
+
+
+def claude_auth_status() -> dict | None:
+    """`claude auth status` as parsed JSON — a definitive answer about the
+    sign-in, unlike guessing from the token file. Spawns a process, so this
+    is for on-demand use (diagnostics), not the poll loop."""
+    import subprocess
+    claude_exe = _find_claude_cli()
+    if claude_exe is None:
+        return None
+    argv = (["cmd.exe", "/c", str(claude_exe), "auth", "status"]
+            if claude_exe.suffix.lower() in (".cmd", ".bat")
+            else [str(claude_exe), "auth", "status"])
+    try:
+        r = subprocess.run(argv, capture_output=True, timeout=30,
+                           cwd=str(Path.home()), creationflags=0x08000000)
+        return json.loads(r.stdout.decode("utf-8", "ignore"))
+    except Exception:
+        return None
+
+
 def _try_cli_refresh() -> bool:
     import subprocess
     claude_exe = _find_claude_cli()

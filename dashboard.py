@@ -124,6 +124,11 @@ class Dashboard:
         self.claude_models = ttk.Label(claude_frame, text="", foreground="#666",
                                        wraplength=460, justify="left")
         self.claude_models.grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.claude_login_btn = ttk.Button(claude_frame, text="Claude にログイン",
+                                           command=self._do_claude_login)
+        self.claude_login_btn.grid(row=4, column=0, columnspan=4, sticky="w",
+                                   pady=(8, 0))
+        self.claude_login_btn.grid_remove()
 
         # Footer
         footer = ttk.Frame(win, padding=(14, 0, 14, 12))
@@ -131,6 +136,15 @@ class Dashboard:
         ttk.Label(footer, text="config.json でプラン上限・更新間隔を調整可", foreground="#888").pack(side="left")
 
         self.win = win
+
+    def _do_claude_login(self):
+        import parsers
+        if parsers.start_interactive_login():
+            self.claude_login_btn.config(text="サインイン画面を開きました",
+                                         state="disabled")
+        else:
+            self.claude_login_btn.config(text="Claude Code が見つかりません",
+                                         state="disabled")
 
     def _row_with_bar(self, parent, row: int, label: str, key: str):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8))
@@ -201,13 +215,15 @@ class Dashboard:
             # The widget only has room for a "!" — say what to do about it here.
             self.claude_plan.config(
                 text=("★ Claude の認証が切れています（ウィジェットの ! はこれ）\n"
-                      "PowerShell で  claude auth login  を実行してください。\n"
-                      "直らない場合は、通知領域アイコンの右クリック → "
-                      "「診断情報を表示」の内容をご確認ください。"))
+                      "下のボタンからサインインしてください。"))
             self._set_bar("claude_5h", None, 0)
             self._set_bar("claude_week", None, 0)
-            self.claude_models.config(text=cc.note)
+            self.claude_models.config(
+                text="直らない場合は、通知領域アイコンの右クリック → "
+                     "「診断情報を表示」の内容をご確認ください。")
+            self.claude_login_btn.grid()
         elif cc.available:
+            self.claude_login_btn.grid_remove()
             is_estimate = cc.note.startswith("estimate")
             model_lbl = cc.model or "Claude"
             if is_estimate:
@@ -248,6 +264,7 @@ class Dashboard:
                 extras.append(f"5h models: {joined}")
             self.claude_models.config(text="   ".join(extras))
         else:
+            self.claude_login_btn.grid_remove()
             self.claude_plan.config(text="plan: (Claude データなし)")
             self._set_bar("claude_5h", None, 0)
             self._set_bar("claude_week", None, 0)

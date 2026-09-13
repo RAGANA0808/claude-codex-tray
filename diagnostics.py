@@ -68,8 +68,16 @@ def collect() -> str:
             add(f"  Desktop    : ★読み取り失敗 {e}")
     ll = parsers._find_long_lived_token()
     add(f"  setup-token: {'あり' if ll else 'なし (通常はこれで問題ありません)'}")
+    st_auth = parsers.claude_auth_status()
+    if st_auth is None:
+        add("  auth status : 取得できません（Claude Code 未導入の可能性）")
+    else:
+        add(f"  auth status : loggedIn={st_auth.get('loggedIn')} "
+            f"method={st_auth.get('authMethod')} "
+            f"plan={st_auth.get('subscriptionType')}")
     if parsers.needs_login():
         add("  ★再ログインが必要と判定しています（ウィジェットの ! の理由）")
+        add("    対処     : 通知領域アイコンを右クリック →「Claude にログイン…」")
         try:
             d = json.loads(parsers._NEEDS_LOGIN_FLAG.read_text(encoding="utf-8"))
             add(f"    判定時刻 : {_fmt_age(d.get('at', 0))}")
