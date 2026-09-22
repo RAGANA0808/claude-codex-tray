@@ -1,4 +1,6 @@
 """Widget geometry: column sizing and which sides are drawn."""
+from pathlib import Path
+
 import pytest
 
 import taskbar_widget as tw
@@ -251,3 +253,20 @@ def test_embedded_never_samples_the_strip():
     import types
     w = types.SimpleNamespace(embedded=True, cfg={}, _hwnd=1, _matched_bg=None)
     assert tw.TaskbarWidget._float_background(w) == tw.BG
+
+
+# --- unknown is not zero ------------------------------------------------
+
+def test_unreadable_fable_is_not_reported_as_zero():
+    """0% reads as "nothing used"; the truth was "cannot be read"."""
+    src = Path(tw.__file__).read_text(encoding="utf-8")
+    assert "fable_pct = 0.0" not in src
+    assert "fable_shown = True" in src
+
+
+def test_draw_side_accepts_a_shown_but_unknown_extra():
+    import inspect
+    src = inspect.getsource(tw.TaskbarWidget.render)
+    assert "extra_shown" in src
+    # the slot is drawn when asked for, even with no value to put in it
+    assert "if extra_shown or extra_pct is not None:" in src

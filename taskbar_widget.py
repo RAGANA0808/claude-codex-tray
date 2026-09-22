@@ -1010,7 +1010,8 @@ class TaskbarWidget:
                       extra_pct: float | None = None,
                       extra_reset: float | int | None = None,
                       extra_caption: str = "",
-                      extra_color: str | None = None):
+                      extra_color: str | None = None,
+                      extra_shown: bool = False):
             # icon (or letter fallback)
             ic_y = (HEIGHT - ICON_PX) // 2
             if icon_obj is not None:
@@ -1023,12 +1024,19 @@ class TaskbarWidget:
                               text=fallback_letter, fill=self._adj(FG_LABEL),
                               font=("Segoe UI Semibold", 13))
 
-            # annotation (small asterisk for estimate mode, etc.) over the icon
+            # State marker over the icon. Drawn as a badge: bare text sank into
+            # the icon's own artwork and went unnoticed.
             if annotation:
-                c.create_text(x0 + ICON_PX - sc(3), ic_y + sc(2),
-                              text=annotation, fill=self._adj(COLOR_WARN),
-                              font=("Segoe UI Semibold", 10),
-                              anchor="ne")
+                r = max(sc(5), 5)
+                cx = x0 + ICON_PX - r
+                cy = ic_y + r
+                tone = COLOR_DANGER if annotation == "!" else COLOR_WARN
+                c.create_oval(cx - r, cy - r, cx + r, cy + r,
+                              fill=self._adj(tone),
+                              outline=self._adj(BG), width=max(1, sc(1)))
+                c.create_text(cx, cy, text=annotation,
+                              fill=self._adj("#ffffff"),
+                              font=("Segoe UI Semibold", 8))
 
             bx = x0 + ICON_PX + gap_icon
 
@@ -1061,7 +1069,7 @@ class TaskbarWidget:
                                   fill=self._adj(FG_DIM), font=("Segoe UI", 9))
 
             draw_group(bx, row_y_top, "5h", pct_a, reset_a)
-            if extra_pct is not None:
+            if extra_shown or extra_pct is not None:
                 draw_group(bx + group_w + inter_group_gap, row_y_top,
                            extra_caption or "F", extra_pct, extra_reset,
                            fill_color=extra_color)
@@ -1075,11 +1083,15 @@ class TaskbarWidget:
         fable_on = claude.available and getattr(claude, "fable_available", False)
         fable_pct = claude.fable_pct if fable_on else None
         fable_reset = claude.fable_resets_at if fable_on else None
+        fable_shown = fable_on
         if getattr(claude, "needs_login", False):
             # Never fail silently: make the dead-auth state visible.
             claude_anno = "!"
             if not fable_on:
-                fable_pct = 0.0
+                # Keep the slot, but as "—". It used to print 0%, which reads
+                # as "nothing used" when the truth is "cannot be read".
+                fable_shown = True
+                fable_pct = None
                 fable_reset = None
         if self.float_is_transparent():
             # Transparent pixels pass clicks through, so leave something
@@ -1092,7 +1104,8 @@ class TaskbarWidget:
             draw_side(x, self._icon_claude, "C", claude_5h, claude_7d,
                       claude_r5, claude_r7, claude_anno,
                       extra_pct=fable_pct, extra_reset=fable_reset,
-                      extra_caption="F", extra_color=COLOR_FABLE)
+                      extra_caption="F", extra_color=COLOR_FABLE,
+                      extra_shown=fable_shown)
             x += side_width(True) + pad_x
 
         if show_claude and show_codex:
