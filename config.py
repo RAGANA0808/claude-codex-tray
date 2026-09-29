@@ -64,6 +64,11 @@ DEFAULTS = {
     # window can lose the z-order fight with the taskbar and blink out.
     "float_transparent": False,
 
+    # Draw the embedded bar as a layered window (per-pixel alpha): exact
+    # colours over any taskbar, light ones included, and nothing left behind
+    # on the strip. false = the older plain child with additive correction.
+    "embed_layered": True,
+
     # Which halves of the bar to draw. Turning one off narrows the widget
     # instead of leaving a gap. Both off is treated as both on.
     "show_claude": True,

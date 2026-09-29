@@ -21,6 +21,7 @@ _GWL_STYLE = -16
 _WS_EX_NOACTIVATE = 0x08000000
 _WS_EX_TOOLWINDOW = 0x00000080
 _WS_EX_TOPMOST = 0x00000008
+_WS_EX_LAYERED = 0x00080000
 _WS_CHILD = 0x40000000
 _WS_POPUP = 0x80000000
 _HWND_TOP = 0
@@ -136,6 +137,26 @@ GROW_DELAY_S = 3.0      # room must stay free this long before the bar widens
 FONT_CAP = ("Segoe UI", 8)
 FONT_PCT = ("Segoe UI Semibold", 9)
 FONT_TIME = ("Segoe UI", 9)
+FONT_LETTER = ("Segoe UI Semibold", 13)
+FONT_BADGE = ("Segoe UI Semibold", 8)
+_FONT_FILES = {"Segoe UI": "segoeui.ttf", "Segoe UI Semibold": "seguisb.ttf"}
+_pil_fonts: dict = {}
+
+
+def _pil_font(font: tuple[str, int]):
+    """The PIL twin of a Tk (family, points) font, at the pixel size Tk uses."""
+    key = (font, SCALE)
+    if key not in _pil_fonts:
+        from PIL import ImageFont
+        px = max(1, int(round(font[1] * SCALE * 96 / 72)))
+        try:
+            _pil_fonts[key] = ImageFont.truetype(_FONT_FILES.get(font[0], "segoeui.ttf"), px)
+        except OSError:
+            try:
+                _pil_fonts[key] = ImageFont.load_default(px)
+            except TypeError:        # Pillow < 10.1 has no sized default
+                _pil_fonts[key] = ImageFont.load_default()
+    return _pil_fonts[key]
 
 
 def _format_countdown(reset_epoch: float | int | None) -> str:
@@ -221,12 +242,22 @@ def init_scale(root, cfg: dict | None = None) -> float:
     BAR_H, ROW_Y_TOP = sc(12), sc(6)
 
     def widest(font, samples) -> int:
+        # Measured with both renderers (Tk for a floating bar, PIL for an
+        # embedded one); their hinting differs by a pixel or so.
+        best = 0
         try:
             import tkinter.font as tkfont
             f = tkfont.Font(root=root, family=font[0], size=font[1])
-            return max(f.measure(s) for s in samples)
+            best = max(f.measure(s) for s in samples)
         except Exception:
-            return 0
+            pass
+        try:
+            import math
+            f = _pil_font(font)
+            best = max(best, max(math.ceil(f.getlength(s)) for s in samples))
+        except Exception:
+            pass
+        return best
 
     # Widest string each column ever has to hold.
     CAP_W = max(widest(FONT_CAP, ("5h", "7d", "F")), sc(12))
@@ -529,8 +560,8 @@ def _get_taskbar_height() -> int:
     return 48
 
 
-def _load_app_icon(name: str, px: int) -> tk.PhotoImage | None:
-    """Load the icon for `name`, resize to `px`, return as PhotoImage.
+def _load_app_icon_image(name: str, px: int):
+    """The icon for `name` as a `px`-square RGBA PIL image, or None.
 
     Looks for a user-supplied app-{name}-custom.png first (git-ignored, so
     each user can drop in whatever artwork they like), then falls back to the
@@ -538,7 +569,7 @@ def _load_app_icon(name: str, px: int) -> tk.PhotoImage | None:
     PIL/Pillow isn't available — the caller then draws a letter tile.
     """
     try:
-        from PIL import Image, ImageTk  # type: ignore
+        from PIL import Image  # type: ignore
     except Exception:
         return None
     p = paths.user_data_dir() / f"app-{name}-custom.png"
@@ -552,10 +583,290 @@ def _load_app_icon(name: str, px: int) -> tk.PhotoImage | None:
         img = Image.open(p).convert("RGBA")
         if img.size != (px, px):
             img = img.resize((px, px), Image.LANCZOS)
+        return img
+    except Exception as e:
+        print(f"[widget] icon load fail ({name}): {e}")
+        return None
+
+
+def _load_app_icon(name: str, px: int) -> tk.PhotoImage | None:
+    img = _load_app_icon_image(name, px)
+    if img is None:
+        return None
+    try:
+        from PIL import ImageTk  # type: ignore
         return ImageTk.PhotoImage(img)
     except Exception as e:
         print(f"[widget] icon load fail ({name}): {e}")
         return None
+
+
+# --- two ways to draw the same bar --------------------------------------
+#
+# A floating bar is an ordinary window and Tk draws it. Embedded, a plain
+# child of the taskbar is blended ADDITIVELY into the strip (see
+# _classify_calibration): nothing it draws can be darker than the taskbar,
+# so a light taskbar cannot show dark text at all, and the bar needs an
+# offset calibration and ghost clean-up even on a dark one. A LAYERED child
+# (UpdateLayeredWindow with per-pixel alpha) is composited "over" instead:
+# its colours land exactly and a transparent background shows the real
+# taskbar through. That needs the whole frame as an image, hence a second
+# painter with the same primitives.
+
+class _CanvasPainter:
+    """Draws with Tk canvas items."""
+
+    def __init__(self, widget):
+        self.c = widget.canvas
+        self.adj = widget._adj
+        self.icons = {"claude": widget._icon_claude, "codex": widget._icon_codex}
+        self.c.delete("all")
+
+    def rect(self, x0, y0, x1, y1, fill, outline=None):
+        self.c.create_rectangle(x0, y0, x1, y1, fill=self.adj(fill),
+                                outline=self.adj(outline) if outline else "")
+
+    def text(self, x, y, s, fill, font, anchor="w"):
+        self.c.create_text(x, y, text=s, fill=self.adj(fill), font=font,
+                           anchor=anchor)
+
+    def oval(self, x0, y0, x1, y1, fill, outline, width):
+        self.c.create_oval(x0, y0, x1, y1, fill=self.adj(fill),
+                           outline=self.adj(outline), width=width)
+
+    def vline(self, x, y0, y1, fill):
+        self.c.create_line(x, y0, x, y1, fill=self.adj(fill))
+
+    def icon(self, name, x0, y0) -> bool:
+        img = self.icons.get(name)
+        if img is None:
+            return False
+        self.c.create_image(x0 + ICON_PX / 2, y0 + ICON_PX / 2, image=img)
+        return True
+
+
+class _ImagePainter:
+    """Draws into an RGBA image for a layered window.
+
+    Every shape is composited "over" through its own coverage mask, so the
+    anti-aliased edges carry true alpha instead of being pre-blended with a
+    background colour that is not there.
+    """
+
+    def __init__(self, width: int, height: int, icons: dict | None = None):
+        from PIL import Image, ImageDraw
+        self._Image, self._Draw = Image, ImageDraw
+        # Alpha 1, not 0: a fully transparent pixel passes clicks through to
+        # the taskbar, and the bar must stay draggable between its words.
+        self.img = Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 1))
+        self.icons = icons or {}
+        self.texts: list[tuple[int, int, int, int]] = []   # drawn text boxes
+
+    def _over(self, color: str, paint) -> None:
+        mask = self._Image.new("L", self.img.size, 0)
+        paint(self._Draw.Draw(mask))
+        layer = self._Image.new("RGBA", self.img.size, _hex_to_rgb(color) + (255,))
+        layer.putalpha(mask)
+        self.img.alpha_composite(layer)
+
+    def rect(self, x0, y0, x1, y1, fill, outline=None):
+        box = tuple(int(round(v)) for v in (x0, y0, x1 - 1, y1 - 1))
+        if box[2] < box[0] or box[3] < box[1]:
+            return
+        self._over(fill, lambda d: d.rectangle(box, fill=255))
+        if outline:
+            self._over(outline, lambda d: d.rectangle(box, outline=255))
+
+    def text(self, x, y, s, fill, font, anchor="w"):
+        f = _pil_font(font)
+        a = "lm" if anchor == "w" else "mm"
+        self._over(fill, lambda d: d.text((x, y), s, font=f, fill=255, anchor=a))
+        self.texts.append(self._Draw.Draw(self.img).textbbox((x, y), s, font=f, anchor=a))
+
+    def oval(self, x0, y0, x1, y1, fill, outline, width):
+        # PIL does not anti-alias ellipses: draw 4x larger and scale down.
+        x0, y0 = int(round(x0)), int(round(y0))
+        w, h = int(round(x1)) - x0, int(round(y1)) - y0
+        if w <= 0 or h <= 0:
+            return
+        k = 4
+
+        def disc(inset):
+            big = self._Image.new("L", (w * k, h * k), 0)
+            i = inset * k
+            self._Draw.Draw(big).ellipse((i, i, w * k - 1 - i, h * k - 1 - i), fill=255)
+            small = big.resize((w, h), self._Image.LANCZOS)
+            return lambda d: d.bitmap((x0, y0), small, fill=255)
+
+        if outline and width:
+            self._over(outline, disc(0))
+        self._over(fill, disc(width if outline else 0))
+
+    def vline(self, x, y0, y1, fill):
+        self.rect(x, y0, x + 1, y1, fill)
+
+    def icon(self, name, x0, y0) -> bool:
+        img = self.icons.get(name)
+        if img is None:
+            return False
+        self.img.alpha_composite(img, dest=(int(round(x0)), int(round(y0))))
+        return True
+
+
+def _clear_frame(width: int, height: int):
+    from PIL import Image
+    return Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 0))
+
+
+class _WNDCLASSW(ctypes.Structure):
+    _fields_ = [("style", ctypes.c_uint), ("lpfnWndProc", ctypes.c_void_p),
+                ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                ("hInstance", ctypes.c_void_p), ("hIcon", ctypes.c_void_p),
+                ("hCursor", ctypes.c_void_p), ("hbrBackground", ctypes.c_void_p),
+                ("lpszMenuName", ctypes.c_wchar_p), ("lpszClassName", ctypes.c_wchar_p)]
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+_WIPE_CLASS = "ClaudeCodexUsageWipe"
+
+
+def _wipe_taskbar_strip(taskbar: int, x: int, y: int, w: int, h: int) -> None:
+    """Paint black over part of the taskbar through a throwaway plain child.
+
+    Its own class with a black background, so even if Windows gets to erase
+    it before it is gone, the erase is black too. Nothing is pumped in
+    between: the window lives for one fill.
+    """
+    try:
+        u = ctypes.WinDLL("user32", use_last_error=True)
+        g = ctypes.WinDLL("gdi32")
+        k = ctypes.WinDLL("kernel32")
+        vp = ctypes.c_void_p
+        k.GetModuleHandleW.restype, k.GetModuleHandleW.argtypes = vp, [ctypes.c_wchar_p]
+        g.GetStockObject.restype, g.GetStockObject.argtypes = vp, [ctypes.c_int]
+        u.CreateWindowExW.restype = vp
+        u.CreateWindowExW.argtypes = [ctypes.c_uint32, ctypes.c_wchar_p, ctypes.c_wchar_p,
+                                      ctypes.c_uint32, ctypes.c_int, ctypes.c_int,
+                                      ctypes.c_int, ctypes.c_int, vp, vp, vp, vp]
+        u.GetDC.restype, u.GetDC.argtypes = vp, [vp]
+        u.ReleaseDC.argtypes = [vp, vp]
+        u.FillRect.argtypes = [vp, ctypes.POINTER(_RECT), vp]
+        u.DestroyWindow.argtypes = [vp]
+        u.RegisterClassW.argtypes = [ctypes.POINTER(_WNDCLASSW)]
+        hinst = k.GetModuleHandleW(None)
+        black = g.GetStockObject(4)                       # BLACK_BRUSH
+        wc = _WNDCLASSW(0, ctypes.cast(u.DefWindowProcW, vp).value, 0, 0, hinst,
+                        None, None, black, None, _WIPE_CLASS)
+        u.RegisterClassW(ctypes.byref(wc))                # fails harmlessly if registered
+        hwnd = u.CreateWindowExW(0x08000000, _WIPE_CLASS, None,       # WS_EX_NOACTIVATE
+                                 0x40000000 | 0x10000000,             # WS_CHILD | WS_VISIBLE
+                                 x, y, w, h, taskbar, None, hinst, None)
+        if not hwnd:
+            return
+        try:
+            u.SetWindowPos(ctypes.c_void_p(hwnd), None, 0, 0, 0, 0,
+                           _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE)   # top of the children
+            hdc = u.GetDC(hwnd)
+            if hdc:
+                u.FillRect(hdc, ctypes.byref(_RECT(0, 0, w, h)), black)
+                u.ReleaseDC(hwnd, hdc)
+            g.GdiFlush()
+        finally:
+            u.DestroyWindow(hwnd)
+    except Exception as e:
+        print(f"[widget] taskbar wipe failed: {e}")
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32),
+                ("biHeight", ctypes.c_int32), ("biPlanes", ctypes.c_uint16),
+                ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+                ("biYPelsPerMeter", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32),
+                ("biClrImportant", ctypes.c_uint32)]
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class _SIZE(ctypes.Structure):
+    _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+
+
+class _BLENDFUNCTION(ctypes.Structure):
+    _fields_ = [("BlendOp", ctypes.c_ubyte), ("BlendFlags", ctypes.c_ubyte),
+                ("SourceConstantAlpha", ctypes.c_ubyte), ("AlphaFormat", ctypes.c_ubyte)]
+
+
+class _LayeredSurface:
+    """Pushes RGBA frames to a WS_EX_LAYERED window (UpdateLayeredWindow).
+
+    Uses private user32/gdi32 handles so the argtypes set here never leak
+    into the rest of the app's ctypes calls.
+    """
+
+    def __init__(self, hwnd: int):
+        self.hwnd = hwnd
+        u = self._u = ctypes.WinDLL("user32")
+        g = self._g = ctypes.WinDLL("gdi32")
+        vp = ctypes.c_void_p
+        u.GetDC.restype, u.GetDC.argtypes = vp, [vp]
+        u.ReleaseDC.argtypes = [vp, vp]
+        u.UpdateLayeredWindow.argtypes = [vp, vp, vp, vp, vp, vp, ctypes.c_uint32,
+                                          vp, ctypes.c_uint32]
+        g.CreateCompatibleDC.restype, g.CreateCompatibleDC.argtypes = vp, [vp]
+        g.CreateDIBSection.restype = vp
+        g.CreateDIBSection.argtypes = [vp, vp, ctypes.c_uint, ctypes.POINTER(vp), vp,
+                                       ctypes.c_uint32]
+        g.SelectObject.restype, g.SelectObject.argtypes = vp, [vp, vp]
+        g.DeleteObject.argtypes = [vp]
+        g.DeleteDC.argtypes = [vp]
+        self.size: tuple[int, int] | None = None
+        self.mem = self.dib = self.old = None
+        self.bits = ctypes.c_void_p()
+
+    def _alloc(self, w: int, h: int) -> None:
+        self.release()
+        screen = self._u.GetDC(None)
+        try:
+            self.mem = self._g.CreateCompatibleDC(screen)
+            bmi = _BITMAPINFOHEADER(ctypes.sizeof(_BITMAPINFOHEADER), w, -h, 1, 32,
+                                    0, 0, 0, 0, 0, 0)
+            self.dib = self._g.CreateDIBSection(screen, ctypes.byref(bmi), 0,
+                                                ctypes.byref(self.bits), None, 0)
+        finally:
+            self._u.ReleaseDC(None, screen)
+        if not self.mem or not self.dib:
+            raise OSError("could not allocate the layered frame")
+        self.old = self._g.SelectObject(self.mem, self.dib)
+        self.size = (w, h)
+
+    def push(self, img) -> bool:
+        w, h = img.size
+        if (w, h) != self.size:
+            self._alloc(w, h)
+        data = img.convert("RGBa").tobytes("raw", "BGRa")   # premultiplied BGRA
+        ctypes.memmove(self.bits, data, len(data))
+        size, src = _SIZE(w, h), _POINT(0, 0)
+        blend = _BLENDFUNCTION(0, 0, 255, 1)                  # AC_SRC_OVER, AC_SRC_ALPHA
+        return bool(self._u.UpdateLayeredWindow(
+            self.hwnd, None, None, ctypes.byref(size), self.mem,
+            ctypes.byref(src), 0, ctypes.byref(blend), 2))     # ULW_ALPHA
+
+    def release(self) -> None:
+        if self.mem:
+            if self.old:
+                self._g.SelectObject(self.mem, self.old)
+            self._g.DeleteDC(self.mem)
+        if self.dib:
+            self._g.DeleteObject(self.dib)
+        self.mem = self.dib = self.old = None
+        self.size = None
 
 
 class TaskbarWidget:
@@ -590,6 +901,9 @@ class TaskbarWidget:
         self._grow: tuple[tuple[str, int], float] | None = None
         self._grow_timer = None
         self._icons: dict[tuple[str, int], tk.PhotoImage | None] = {}
+        self._icon_images: dict[tuple[str, int], object] = {}
+        self._layered = False          # embedded and drawn via UpdateLayeredWindow
+        self._surface: _LayeredSurface | None = None
 
         # Map of the taskbar's free room, kept current on another thread.
         # Waiting briefly for the first map avoids opening at full width over
@@ -645,8 +959,14 @@ class TaskbarWidget:
             key = (name, ICON_PX)
             if key not in self._icons:
                 self._icons[key] = _load_app_icon(name, ICON_PX)
+            if key not in self._icon_images:
+                self._icon_images[key] = _load_app_icon_image(name, ICON_PX)
         self._icon_claude = self._icons[("claude", ICON_PX)]
         self._icon_codex = self._icons[("codex", ICON_PX)]
+
+    def _icon_images_now(self) -> dict:
+        return {name: self._icon_images.get((name, ICON_PX))
+                for name in ("claude", "codex")}
 
     # --- colour ----------------------------------------------------
 
@@ -684,6 +1004,10 @@ class TaskbarWidget:
             self.canvas.configure(bg=bg)
         except tk.TclError:
             pass
+        if self._layered:
+            # Tk's -transparentcolor switches WS_EX_LAYERED off whenever it
+            # has no colour key of its own, which would end the layered frame.
+            return
         # A floating bar cannot match a taskbar that is tinted by the
         # wallpaper, so drop the background entirely and let the real strip
         # show through. Keyed on our own background colour, so anti-aliased
@@ -702,7 +1026,9 @@ class TaskbarWidget:
     def _apply_mode(self):
         if self.wants_embed() and self._embed():
             self._apply_colors()
-            if self._bg_auto:
+            # A layered bar needs no colour offset, but the probe still has to
+            # prove that this taskbar shows it at all.
+            if self._bg_auto or self._layered:
                 self.win.after(400, self._calibrate)
             return
         self._unembed()
@@ -716,10 +1042,97 @@ class TaskbarWidget:
             return
         if self._embed():
             self.relayout()
-            if self._bg_auto:
+            if self._bg_auto or self._layered:
                 self.win.after(400, self._calibrate)
         else:
             self.win.after(300_000, self._retry_embed)
+
+    def _sweep_stale_frames(self) -> None:
+        """Wipe whatever an earlier plain child left in the taskbar's surface.
+
+        A plain child draws into the taskbar's own surface, and the taskbar
+        never repaints a region a child leaves: a previous version that was
+        killed rather than quit leaves its last frame there for good. The
+        layered bar's background is see-through, so that frame would show
+        through it. Black adds nothing in the additive blend, so painting it
+        over the stretch beside the clock (and our own slot) removes the
+        stale pixels without visibly changing the taskbar.
+        """
+        r = _window_rect(self._taskbar)
+        if r is None:
+            return
+        size, x = self._target(r)
+        spans = [(x, x + layout_width(self.cfg, size))]
+        home = self._space.home() if self._space is not None else None
+        if home is not None:
+            spans.append(home)
+        else:
+            # where every earlier version sat by default
+            right = r[2] - self._default_right_offset(self._taskbar)
+            spans.append((right - layout_width(self.cfg, SIZES[0]), right))
+        lo = max(r[0], min(s[0] for s in spans))
+        hi = min(r[2], max(s[1] for s in spans))
+        if hi > lo:
+            _wipe_taskbar_strip(self._taskbar, lo - r[0], 0, hi - lo, r[3] - r[1])
+
+    def _enter_layered(self) -> bool:
+        """Draw the embedded bar through UpdateLayeredWindow (see the painters
+        above). False, with the window left as it was, where that fails."""
+        if not self.cfg.get("embed_layered", True):
+            return False
+        if self._layered and self._surface is not None:
+            return True          # re-embedding (e.g. after a theme switch)
+        try:
+            # A colour key left from a see-through floating bar makes Windows
+            # refuse UpdateLayeredWindow on the same window; clear it first.
+            self.win.wm_attributes("-transparentcolor", "")
+        except tk.TclError:
+            pass
+        try:
+            u = ctypes.windll.user32
+            ex = u.GetWindowLongW(self._hwnd, _GWL_EXSTYLE)
+            u.SetWindowLongW(self._hwnd, _GWL_EXSTYLE, ex | _WS_EX_LAYERED)
+            self._surface = _LayeredSurface(self._hwnd)
+            self._layered = True
+            if self._surface.push(_clear_frame(WIDTH, HEIGHT)):
+                return True
+            print("[widget] UpdateLayeredWindow refused the frame")
+        except Exception as e:
+            print(f"[widget] layered drawing unavailable: {e}")
+        self._leave_layered()
+        return False
+
+    def _leave_layered(self) -> None:
+        """Back to Tk's own painting."""
+        if self._surface is not None:
+            try:
+                self._surface.release()
+            except Exception:
+                pass
+            self._surface = None
+        self._layered = False
+        try:
+            u = ctypes.windll.user32
+            ex = u.GetWindowLongW(self._hwnd, _GWL_EXSTYLE)
+            if ex & _WS_EX_LAYERED:
+                u.SetWindowLongW(self._hwnd, _GWL_EXSTYLE, ex & ~_WS_EX_LAYERED)
+                # RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN
+                u.RedrawWindow(ctypes.c_void_p(self._hwnd), None, None, 0x4 | 0x1 | 0x400 | 0x80)
+        except Exception:
+            pass
+
+    def _push_frame(self, img) -> None:
+        try:
+            ok = self._surface is not None and self._surface.push(img)
+        except Exception as e:
+            print(f"[widget] layered frame failed: {e}")
+            ok = False
+        if not ok and self._layered:
+            # Keep showing something: fall back to painting the plain child.
+            self._leave_layered()
+            self._bg_offset = _hex_to_rgb(TASKBAR_BG)
+            self._apply_colors()
+            self.redraw_last()
 
     def _probe_box(self) -> tuple[int, int, int, int]:
         """A small patch in the middle of the bar.
@@ -733,6 +1146,11 @@ class TaskbarWidget:
         return (cx - h, cy - h, cx + h, cy + h)
 
     def _probe_paint(self, color: str) -> None:
+        if self._layered:
+            p = _ImagePainter(WIDTH, HEIGHT)
+            p.rect(*self._probe_box(), color)
+            self._push_frame(p.img)
+            return
         try:
             self.canvas.delete("all")
             self._apply_colors()
@@ -778,7 +1196,20 @@ class TaskbarWidget:
                 verdict, offset = _classify_calibration(s_black, s_gray)
                 _write_calibration_state({
                     "verdict": verdict, "black": s_black, "gray": s_gray,
-                    "offset": offset})
+                    "offset": offset, "layered": self._layered})
+                if (self._layered and verdict in ("ok", "approx")
+                        and offset is not None and max(offset) > 8):
+                    # Black did not come out black: this taskbar adds even a
+                    # layered bar onto its backdrop. Use the plain child, whose
+                    # offset correction handles exactly that, and measure again.
+                    print(f"[widget] layered bar blended additively ({offset}); "
+                          "using the plain child")
+                    self._leave_layered()
+                    self._bg_offset = offset
+                    self._apply_colors()
+                    self.redraw_last()
+                    self.win.after(400, self._calibrate)
+                    return
                 if verdict in ("ok", "approx") and offset is not None:
                     self._bg_offset = offset
                     self._apply_colors()
@@ -833,6 +1264,9 @@ class TaskbarWidget:
                 return False
             self._taskbar = tb
             self.embedded = True
+            self._sweep_stale_frames()
+            if self._enter_layered():
+                self._bg_offset = (0, 0, 0)   # composited "over": no offset
             # Repaint in the embedded palette BEFORE the window is shown at its
             # slot: the canvas is built in the floating colours, and the taskbar
             # keeps whatever a child last drew, so showing it first burns that
@@ -848,12 +1282,18 @@ class TaskbarWidget:
         if not self.embedded:
             return
         self._blank()
+        if self._layered:
+            # Go invisible while still layered and only drop the style once
+            # we are a top-level window again: turned into a plain child first,
+            # Tk would paint one frame into the taskbar and leave it there.
+            self._push_frame(_clear_frame(WIDTH, HEIGHT))
         try:
             u = ctypes.windll.user32
             u.SetParent(self._hwnd, None)
             style = u.GetWindowLongW(self._hwnd, _GWL_STYLE) & 0xFFFFFFFF
             u.SetWindowLongW(self._hwnd, _GWL_STYLE,
                              _i32((style & ~_WS_CHILD) | _WS_POPUP))
+            self._leave_layered()
             self.win.wm_attributes("-topmost", True)
         except Exception as e:
             print(f"[widget] unembed failed: {e}")
@@ -1189,8 +1629,9 @@ class TaskbarWidget:
     def _blank(self):
         """Wipe to the bare taskbar colour and let it paint. The taskbar never
         recomposites a region a child window vacates, so whatever is on screen
-        when we move or quit stays there — leave the taskbar's own colour."""
-        if not self.embedded:
+        when we move or quit stays there — leave the taskbar's own colour.
+        A layered bar is composited on its own and leaves nothing behind."""
+        if not self.embedded or self._layered:
             return
         try:
             self.canvas.delete("all")
@@ -1227,13 +1668,19 @@ class TaskbarWidget:
         warn = int(t.get("warn", 50))
         danger = int(t.get("danger", 80))
 
-        c = self.canvas
-        c.delete("all")
+        if getattr(self, "_layered", False):
+            p = _ImagePainter(WIDTH, HEIGHT, self._icon_images_now())
+        else:
+            if not self.embedded:
+                # Re-match on every redraw: the strip's tint moves with the
+                # wallpaper and with whatever is behind it.
+                self._apply_colors()
+            p = _CanvasPainter(self)
+        self._draw(p, snap, cfg, warn, danger)
+        if isinstance(p, _ImagePainter):
+            self._push_frame(p.img)
 
-        if not self.embedded:
-            # Re-match on every redraw: the strip's tint moves with the
-            # wallpaper and with whatever is behind it.
-            self._apply_colors()
+    def _draw(self, p, snap, cfg: dict, warn: int, danger: int) -> None:
         pad_x, gap_icon = PAD_X, GAP_ICON
         bar_h, bar_w = BAR_H, BAR_W
         row_y_top = ROW_Y_TOP
@@ -1245,7 +1692,7 @@ class TaskbarWidget:
         codex = snap.codex
         claude = snap.claude
 
-        def draw_side(x0: int, icon_obj, fallback_letter: str,
+        def draw_side(x0: int, icon_name: str, fallback_letter: str,
                       pct_a: float | None, pct_b: float | None,
                       reset_a: float | int | None = None,
                       reset_b: float | int | None = None,
@@ -1257,15 +1704,11 @@ class TaskbarWidget:
                       extra_shown: bool = False):
             # icon (or letter fallback)
             ic_y = (HEIGHT - ICON_PX) // 2
-            if icon_obj is not None:
-                c.create_image(x0 + ICON_PX / 2, ic_y + ICON_PX / 2, image=icon_obj)
-            else:
-                c.create_rectangle(x0, ic_y, x0 + ICON_PX, ic_y + ICON_PX,
-                                   fill=self._adj(TILE_FILL),
-                                   outline=self._adj(TILE_EDGE))
-                c.create_text(x0 + ICON_PX / 2, ic_y + ICON_PX / 2,
-                              text=fallback_letter, fill=self._adj(FG_LABEL),
-                              font=("Segoe UI Semibold", 13))
+            if not p.icon(icon_name, x0, ic_y):
+                p.rect(x0, ic_y, x0 + ICON_PX, ic_y + ICON_PX, TILE_FILL,
+                       outline=TILE_EDGE)
+                p.text(x0 + ICON_PX / 2, ic_y + ICON_PX / 2, fallback_letter,
+                       FG_LABEL, FONT_LETTER, anchor="center")
 
             # State marker over the icon. Drawn as a badge: bare text sank into
             # the icon's own artwork and went unnoticed.
@@ -1274,48 +1717,35 @@ class TaskbarWidget:
                 cx = x0 + ICON_PX - r
                 cy = ic_y + r
                 tone = COLOR_DANGER if annotation == "!" else COLOR_WARN
-                c.create_oval(cx - r, cy - r, cx + r, cy + r,
-                              fill=self._adj(tone),
-                              outline=self._adj(BG), width=max(1, sc(1)))
-                c.create_text(cx, cy, text=annotation,
-                              fill=self._adj("#ffffff"),
-                              font=("Segoe UI Semibold", 8))
+                p.oval(cx - r, cy - r, cx + r, cy + r, tone, BG, max(1, sc(1)))
+                p.text(cx, cy, annotation, "#ffffff", FONT_BADGE, anchor="center")
 
             bx = x0 + ICON_PX + gap_icon
 
             def draw_group(gx: int, y: int, caption: str,
                            pct: float | None, reset_epoch: float | int | None,
                            fill_color: str | None = None):
-                c.create_text(gx + cap_w / 2, y + bar_h / 2,
-                              text=caption, fill=self._adj(FG_DIM),
-                              font=FONT_CAP)
+                p.text(gx + cap_w / 2, y + bar_h / 2, caption, FG_DIM, FONT_CAP,
+                       anchor="center")
                 bxx = gx + cap_w + CAP_GAP
                 color = fill_color if fill_color else _pick_color(pct, warn, danger)
                 ink = FG_LABEL
                 if bar_w:
-                    c.create_rectangle(bxx, y, bxx + bar_w, y + bar_h,
-                                       fill=self._adj(BG_BAR), outline="")
+                    p.rect(bxx, y, bxx + bar_w, y + bar_h, BG_BAR)
                     if pct is not None:
                         fw = int(bar_w * max(0, min(100, pct)) / 100)
                         if fw > 0:
-                            c.create_rectangle(
-                                bxx, y, bxx + fw, y + bar_h,
-                                fill=self._adj(color), outline="",
-                            )
+                            p.rect(bxx, y, bxx + fw, y + bar_h, color)
                     bxx += bar_w + GAP
                 else:
                     # No meter to carry the warn/danger colour, so the
                     # number carries it.
                     ink = FG_DIM if pct is None else color
                 txt = "—" if pct is None else f"{pct:.0f}%"
-                c.create_text(bxx, y + bar_h / 2,
-                              text=txt, anchor="w",
-                              fill=self._adj(ink), font=FONT_PCT)
+                p.text(bxx, y + bar_h / 2, txt, ink, FONT_PCT)
                 cd = _format_countdown(reset_epoch) if SHOW_TIME else ""
                 if cd:
-                    c.create_text(bxx + pct_w + TIME_GAP, y + bar_h / 2,
-                                  text=cd, anchor="w",
-                                  fill=self._adj(FG_DIM), font=FONT_TIME)
+                    p.text(bxx + pct_w + TIME_GAP, y + bar_h / 2, cd, FG_DIM, FONT_TIME)
 
             draw_group(bx, row_y_top, "5h", pct_a, reset_a)
             if extra_shown or extra_pct is not None:
@@ -1345,12 +1775,11 @@ class TaskbarWidget:
         if self.float_is_transparent():
             # Transparent pixels pass clicks through, so leave something
             # solid to grab the bar by.
-            c.create_rectangle(0, row_y_top, max(2, sc(3)), HEIGHT - row_y_top,
-                               fill=self._adj(FG_DIM), outline="")
+            p.rect(0, row_y_top, max(2, sc(3)), HEIGHT - row_y_top, FG_DIM)
 
         x = pad_x
         if show_claude:
-            draw_side(x, self._icon_claude, "C", claude_5h, claude_7d,
+            draw_side(x, "claude", "C", claude_5h, claude_7d,
                       claude_r5, claude_r7, claude_anno,
                       extra_pct=fable_pct, extra_reset=fable_reset,
                       extra_caption="F", extra_color=COLOR_FABLE,
@@ -1358,8 +1787,7 @@ class TaskbarWidget:
             x += side_width(True) + pad_x
 
         if show_claude and show_codex:
-            c.create_line(x, ROW_Y_TOP, x, HEIGHT - ROW_Y_TOP,
-                          fill=self._adj(DIVIDER))
+            p.vline(x, ROW_Y_TOP, HEIGHT - ROW_Y_TOP, DIVIDER)
             x += pad_x
 
         codex_5h = codex.primary_pct if (codex.available and codex.has_primary) else None
@@ -1375,5 +1803,5 @@ class TaskbarWidget:
         else:
             codex_anno = ""
         if show_codex:
-            draw_side(x, self._icon_codex, "X", codex_5h, codex_7d,
+            draw_side(x, "codex", "X", codex_5h, codex_7d,
                       codex_r5, codex_r7, codex_anno)

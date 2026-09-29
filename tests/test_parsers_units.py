@@ -201,3 +201,80 @@ def test_429_still_serves_the_last_good_reading(isolated_cache, monkeypatch):
     monkeypatch.setattr(parsers.urllib.request, "urlopen", raise429)
     out = parsers._try_oauth_usage("tok")
     assert out is not None and out["fable_pct"] == 7.0
+
+
+# --- finding the Claude Code CLI -----------------------------------------
+
+def _version_dir(root, version, verified=True):
+    d = root / version
+    d.mkdir(parents=True)
+    (d / "claude.exe").write_bytes(b"MZ")
+    if verified:
+        (d / ".verified").write_text("x", encoding="utf-8")
+    return d
+
+
+@pytest.fixture
+def no_cli_elsewhere(tmp_path, monkeypatch):
+    """A machine where Claude Code exists only inside the desktop app."""
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda *a, **k: None)
+    monkeypatch.setattr(parsers, "_registry_path", lambda: "")
+    monkeypatch.setattr(parsers.Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    return tmp_path
+
+
+def test_the_store_desktop_app_copy_is_found_under_its_package(no_cli_elsewhere):
+    """The Microsoft Store build virtualises AppData: from outside the app its
+    Claude Code lives under Packages/Claude_*/LocalCache, and %APPDATA%/Claude
+    is empty. That is why "Claude にログイン" said Claude Code was missing."""
+    root = (no_cli_elsewhere / "Local" / "Packages" / "Claude_pzs8sxrjxfjjc"
+            / "LocalCache" / "Roaming" / "Claude" / "claude-code")
+    _version_dir(root, "2.1.260")
+    newest = _version_dir(root, "2.1.280")
+    assert parsers._find_claude_cli() == newest / "claude.exe"
+
+
+def test_a_plain_install_copy_in_appdata_is_found_too(no_cli_elsewhere):
+    root = no_cli_elsewhere / "Roaming" / "Claude" / "claude-code"
+    d = _version_dir(root, "2.1.9")
+    assert parsers._find_claude_cli() == d / "claude.exe"
+
+
+def test_versions_compare_as_numbers_not_text(no_cli_elsewhere):
+    root = no_cli_elsewhere / "Roaming" / "Claude" / "claude-code"
+    _version_dir(root, "2.1.99")
+    newest = _version_dir(root, "2.1.100")
+    assert parsers._find_claude_cli() == newest / "claude.exe"
+
+
+def test_a_half_downloaded_version_is_skipped(no_cli_elsewhere):
+    root = no_cli_elsewhere / "Roaming" / "Claude" / "claude-code"
+    good = _version_dir(root, "2.1.280")
+    _version_dir(root, "2.1.290", verified=False)        # still downloading
+    assert parsers._find_claude_cli() == good / "claude.exe"
+
+
+def test_a_standalone_install_wins_over_the_desktop_copy(no_cli_elsewhere):
+    root = no_cli_elsewhere / "Roaming" / "Claude" / "claude-code"
+    _version_dir(root, "2.1.280")
+    own = no_cli_elsewhere / "home" / ".local" / "bin"
+    own.mkdir(parents=True)
+    (own / "claude.exe").write_bytes(b"MZ")
+    assert parsers._find_claude_cli() == own / "claude.exe"
+
+
+def test_nothing_installed_is_reported_as_none(no_cli_elsewhere):
+    assert parsers._find_claude_cli() is None
+
+
+def test_a_path_added_after_start_up_is_still_searched(no_cli_elsewhere, monkeypatch):
+    """Our own PATH is from sign-in; the registry has the current one."""
+    import shutil
+    fresh = no_cli_elsewhere / "fresh"
+    monkeypatch.setattr(parsers, "_registry_path", lambda: str(fresh))
+    monkeypatch.setattr(shutil, "which",
+                        lambda name, path=None, **k: str(fresh / "claude.exe") if path else None)
+    assert parsers._find_claude_cli() == fresh / "claude.exe"

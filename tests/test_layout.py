@@ -68,23 +68,16 @@ def test_group_width_is_the_sum_of_its_columns():
 
 # --- the overflow this file exists for --------------------------------
 
-def test_percentage_column_fits_three_digits():
+def test_percentage_column_fits_three_digits(tk_root):
     """"100%" used to print straight over the reset countdown beside it."""
-    tk = pytest.importorskip("tkinter")
-    try:
-        root = tk.Tk()
-    except Exception:
-        pytest.skip("no display for Tk")
-    try:
-        root.withdraw()
-        tw.init_scale(root, {})
-        import tkinter.font as tkfont
-        f = tkfont.Font(root=root, family=tw.FONT_PCT[0], size=tw.FONT_PCT[1])
-        assert tw.PCT_W >= f.measure("100%")
-        t = tkfont.Font(root=root, family=tw.FONT_TIME[0], size=tw.FONT_TIME[1])
-        assert tw.TIME_W >= max(t.measure(s) for s in ("<1m", "now", "10d", "23h"))
-    finally:
-        root.destroy()
+    import tkinter.font as tkfont
+    tw.init_scale(tk_root, {})
+    f = tkfont.Font(root=tk_root, family=tw.FONT_PCT[0], size=tw.FONT_PCT[1])
+    assert tw.PCT_W >= f.measure("100%")
+    t = tkfont.Font(root=tk_root, family=tw.FONT_TIME[0], size=tw.FONT_TIME[1])
+    assert tw.TIME_W >= max(t.measure(s) for s in ("<1m", "now", "10d", "23h"))
+    # the embedded bar draws with PIL, whose metrics differ slightly
+    assert tw.PCT_W >= tw._pil_font(tw.FONT_PCT).getlength("100%")
 
 
 # --- theme ------------------------------------------------------------
@@ -181,20 +174,16 @@ def test_probe_box_is_small_and_inside_the_bar():
     assert (x1 - x0) <= tw.WIDTH // 4      # a patch, not the whole bar
 
 
-def test_probe_draws_a_patch_and_leaves_the_background_alone():
+def test_probe_draws_a_patch_and_leaves_the_background_alone(tk_root):
     """A probe that recoloured the whole canvas burned a grey block into the
     taskbar whenever calibration was interrupted."""
-    tk = pytest.importorskip("tkinter")
+    import tkinter as tk
     import types
+    tw.init_scale(tk_root, {})
+    canvas = tk.Canvas(tk_root, width=tw.WIDTH, height=tw.HEIGHT)
     try:
-        root = tk.Tk()
-    except Exception:
-        pytest.skip("no display for Tk")
-    try:
-        root.withdraw()
-        tw.init_scale(root, {})
-        canvas = tk.Canvas(root, width=tw.WIDTH, height=tw.HEIGHT)
-        w = types.SimpleNamespace(canvas=canvas, win=root, embedded=True, cfg={},
+        w = types.SimpleNamespace(canvas=canvas, win=tk_root, embedded=True, cfg={},
+                                  _layered=False,
                                   _bg_offset=tw._hex_to_rgb(tw.TASKBAR_BG))
         w._adj = lambda c: tw.TaskbarWidget._adj(w, c)
         w._apply_colors = lambda: tw.TaskbarWidget._apply_colors(w)
@@ -212,7 +201,7 @@ def test_probe_draws_a_patch_and_leaves_the_background_alone():
         assert str(canvas["bg"]).lower() == w._adj(tw.BG).lower()
         assert canvas.find_all() == ()
     finally:
-        root.destroy()
+        canvas.destroy()
 
 
 # --- floating over a taskbar we cannot match ---------------------------
@@ -274,7 +263,7 @@ def test_unreadable_fable_is_not_reported_as_zero():
 
 def test_draw_side_accepts_a_shown_but_unknown_extra():
     import inspect
-    src = inspect.getsource(tw.TaskbarWidget.render)
+    src = inspect.getsource(tw.TaskbarWidget._draw)
     assert "extra_shown" in src
     # the slot is drawn when asked for, even with no value to put in it
     assert "if extra_shown or extra_pct is not None:" in src
@@ -305,18 +294,6 @@ def test_sizes_follow_the_setting():
     assert tw.sizes_for({"widget_size": "huge"}) == tw.SIZES   # unknown -> auto
 
 
-@pytest.fixture(scope="module")
-def tk_root():
-    tk = pytest.importorskip("tkinter")
-    try:
-        root = tk.Tk()
-    except Exception as e:
-        pytest.skip(f"no display for Tk: {e!r}")
-    root.withdraw()
-    yield root
-    root.destroy()
-
-
 def _widest_snapshot():
     """Every value at its widest: 100% and a two-digit day countdown."""
     import time
@@ -336,33 +313,98 @@ def _widest_snapshot():
     return s
 
 
+def _fake_render_target(canvas, cfg, layered=False):
+    import types
+    w = types.SimpleNamespace(canvas=canvas, embedded=layered, cfg=cfg,
+                              _calibrating=False, _layered=layered,
+                              _icon_claude=None, _icon_codex=None, frames=[])
+    w._adj = lambda color: color
+    w._apply_colors = lambda: None
+    w.float_is_transparent = lambda: False
+    w._draw = lambda *a: tw.TaskbarWidget._draw(w, *a)
+    w._icon_images_now = lambda: {}
+    w._push_frame = w.frames.append
+    return w
+
+
+def _assert_apart(boxes, size):
+    import itertools
+    assert boxes
+    for a, b in itertools.combinations(boxes, 2):
+        apart_x = a[2] <= b[0] or b[2] <= a[0]
+        apart_y = a[3] <= b[1] or b[3] <= a[1]
+        assert apart_x or apart_y, (size, a, b)
+
+
 @pytest.mark.parametrize("size", tw.SIZES)
 @pytest.mark.parametrize("sides", SIDES)
 def test_every_layout_keeps_its_text_apart_and_inside_the_bar(tk_root, size, sides):
-    import itertools
     import tkinter as tk
-    import types
     tw.init_scale(tk_root, {})
     cfg = dict(sides, widget_size=size)
     tw.apply_layout(cfg, size)
     canvas = tk.Canvas(tk_root, width=tw.WIDTH, height=tw.HEIGHT)
-    w = types.SimpleNamespace(canvas=canvas, embedded=False, cfg=cfg,
-                              _calibrating=False, _icon_claude=None, _icon_codex=None)
-    w._adj = lambda color: color
-    w._apply_colors = lambda: None
-    w.float_is_transparent = lambda: False
     try:
+        w = _fake_render_target(canvas, cfg)
         tw.TaskbarWidget.render(w, _widest_snapshot(), cfg)
         x0, _y0, x1, _y1 = canvas.bbox("all")
         assert 0 <= x0 and x1 <= tw.WIDTH
-        texts = [canvas.bbox(i) for i in canvas.find_all() if canvas.type(i) == "text"]
-        assert texts
-        for a, b in itertools.combinations(texts, 2):
-            apart_x = a[2] <= b[0] or b[2] <= a[0]
-            apart_y = a[3] <= b[1] or b[3] <= a[1]
-            assert apart_x or apart_y, (size, a, b)
+        _assert_apart([canvas.bbox(i) for i in canvas.find_all()
+                       if canvas.type(i) == "text"], size)
     finally:
         canvas.destroy()
+
+
+@pytest.mark.parametrize("size", tw.SIZES)
+@pytest.mark.parametrize("sides", SIDES)
+def test_the_layered_frame_keeps_its_text_apart_and_inside_the_bar(tk_root, size, sides):
+    """The embedded bar is drawn by PIL, whose text metrics are its own."""
+    tw.init_scale(tk_root, {})
+    cfg = dict(sides, widget_size=size)
+    tw.apply_layout(cfg, size)
+    w = _fake_render_target(None, cfg, layered=True)
+    tw.TaskbarWidget.render(w, _widest_snapshot(), cfg)
+    assert len(w.frames) == 1
+    img = w.frames[0]
+    assert img.size == (tw.WIDTH, tw.HEIGHT)
+    # the same painter records every text box it drew
+    boxes = []
+    painter = tw._ImagePainter(tw.WIDTH, tw.HEIGHT)
+    tw.TaskbarWidget._draw(w, painter, _widest_snapshot(), cfg, 50, 80)
+    boxes = painter.texts
+    assert all(0 <= b[0] and b[2] <= tw.WIDTH for b in boxes)
+    _assert_apart(boxes, size)
+
+
+# --- the layered frame --------------------------------------------------
+
+def test_layered_colours_are_exact_and_the_background_lets_the_taskbar_through():
+    p = tw._ImagePainter(40, 20)
+    p.rect(0, 0, 10, 10, "#808080")
+    assert p.img.getpixel((5, 5)) == (128, 128, 128, 255)
+    # nearly invisible, yet not click-through: the bar stays draggable
+    assert p.img.getpixel((30, 15)) == (0, 0, 0, 1)
+    assert tw._clear_frame(4, 4).getpixel((1, 1)) == (0, 0, 0, 0)
+
+
+def test_layered_text_edges_carry_alpha_not_a_baked_in_background():
+    """Anti-aliased edges must fade by alpha. Blended into a background that
+    is not there, they would show as a dark fringe on a light taskbar."""
+    from PIL import Image
+    p = tw._ImagePainter(80, 30)
+    p.text(5, 15, "5h 100%", "#ffffff", tw.FONT_PCT)
+    alpha_hist = p.img.getchannel("A").histogram()
+    assert sum(alpha_hist[2:255]) > 0, "expected soft edges"
+    light = Image.new("RGBA", p.img.size, (243, 243, 243, 255))
+    shown = Image.alpha_composite(light, p.img).convert("RGB")
+    # white ink on a light strip can only ever brighten it
+    assert min(lo for lo, _hi in shown.getextrema()) >= 241
+
+
+def test_the_frame_is_handed_over_premultiplied_bgra():
+    from PIL import Image
+    img = Image.new("RGBA", (1, 1), (200, 100, 50, 128))
+    assert img.convert("RGBa").tobytes("raw", "BGRa") == bytes((25, 50, 100, 128))
 
 
 def test_meterless_layouts_colour_the_number_instead():

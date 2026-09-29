@@ -59,6 +59,7 @@ class App:
         self.widget: TaskbarWidget | None = None
         self._widget_visible = True  # default-on
         self._notified_needs_login = False
+        self._embed_refusals_shown: set[str] = set()
 
         initial_img = icon_mod.make_icon(None, None)
         self.tray = pystray.Icon(
@@ -259,8 +260,9 @@ class App:
             else:
                 try:
                     self.tray.notify(
-                        "Claude Code が見つかりません。先に Claude Code を"
-                        "インストールしてください。",
+                        "Claude Code が見つかりません。Claude Code を入れるか、"
+                        "Claude デスクトップアプリの「Code」を一度開いてから"
+                        "もう一度お試しください。",
                         "Claude / Codex Usage")
                 except Exception:
                     pass
@@ -461,7 +463,11 @@ class App:
 
     def _on_embed_refused(self, verdict: str):
         """Embedding was measured to be impossible here — the toggle would
-        otherwise just flip back with no explanation."""
+        otherwise just flip back with no explanation. Once per run: the widget
+        tries again every few minutes, and each retry used to notify anew."""
+        if verdict in self._embed_refusals_shown:
+            return
+        self._embed_refusals_shown.add(verdict)
         why = {
             "invisible": "タスクバーがウィジェットの描画を隠しています",
             "too-bright": "タスクバーの色が明るく、埋め込むと文字が読めません",

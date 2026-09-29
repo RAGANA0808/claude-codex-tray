@@ -635,9 +635,15 @@ def _token_ttl_minutes() -> int:
 
 def _find_claude_cli() -> Path | None:
     """Locate the Claude Code CLI. Installs vary by machine (native installer,
-    npm global, winget), so search PATH first and then the usual locations."""
+    npm global, winget, or only the copy inside the Claude desktop app), so
+    search PATH first and then the usual locations."""
     import shutil
     found = shutil.which("claude")
+    if not found:
+        # Our PATH is the one we started with, usually at sign-in; a Claude
+        # Code installed after that is only on the PATH in the registry.
+        fresh = _registry_path()
+        found = shutil.which("claude", path=fresh) if fresh else None
     if found:
         return Path(found)
     appdata = os.environ.get("APPDATA", "")
@@ -647,11 +653,77 @@ def _find_claude_cli() -> Path | None:
         Path(appdata) / "npm" / "claude.cmd" if appdata else None,
         Path(appdata) / "npm" / "claude.ps1" if appdata else None,
         Path(localapp) / "Programs" / "claude" / "claude.exe" if localapp else None,
+        Path(localapp) / "Microsoft" / "WinGet" / "Links" / "claude.exe" if localapp else None,
+        Path.home() / "scoop" / "shims" / "claude.exe",
     ]
     for c in candidates:
         if c and c.exists():
             return c
-    return None
+    return _desktop_app_cli()
+
+
+def _registry_path() -> str:
+    """The user + machine PATH as currently stored, env vars expanded."""
+    try:
+        import winreg
+    except ImportError:
+        return ""
+    parts = []
+    for hive, sub in ((winreg.HKEY_CURRENT_USER, r"Environment"),
+                      (winreg.HKEY_LOCAL_MACHINE,
+                       r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")):
+        try:
+            with winreg.OpenKey(hive, sub) as k:
+                value, _kind = winreg.QueryValueEx(k, "Path")
+        except OSError:
+            continue
+        parts += [os.path.expandvars(p) for p in str(value).split(";") if p.strip()]
+    return os.pathsep.join(parts)
+
+
+def _version_key(name: str) -> tuple[int, ...] | None:
+    try:
+        return tuple(int(p) for p in name.split("."))
+    except ValueError:
+        return None
+
+
+def _desktop_app_cli() -> Path | None:
+    """The Claude Code the Claude desktop app keeps for its Code tab.
+
+    Someone who uses Claude Code only through the desktop app has no `claude`
+    anywhere else. The Microsoft Store (MSIX) build virtualises its AppData:
+    to every process outside the app the files live under
+    %LOCALAPPDATA%\\Packages\\Claude_*\\LocalCache\\Roaming, and %APPDATA%\\Claude
+    shows nothing. Other builds keep them in %APPDATA%\\Claude itself.
+    """
+    roots = []
+    appdata = os.environ.get("APPDATA", "")
+    localapp = os.environ.get("LOCALAPPDATA", "")
+    if appdata:
+        roots.append(Path(appdata) / "Claude" / "claude-code")
+    if localapp:
+        try:
+            roots += (Path(localapp) / "Packages").glob(
+                "Claude_*/LocalCache/Roaming/Claude/claude-code")
+        except OSError:
+            pass
+    best = None
+    for root in roots:
+        try:
+            versions = list(root.iterdir())
+        except OSError:
+            continue
+        for d in versions:
+            key = _version_key(d.name)
+            exe = d / "claude.exe"
+            # .verified is written once the app has checked the download, so
+            # a half-fetched newer version is never picked over a whole one.
+            if key is None or not exe.is_file() or not (d / ".verified").exists():
+                continue
+            if best is None or key > best[0]:
+                best = (key, exe)
+    return best[1] if best else None
 
 
 def needs_login() -> bool:

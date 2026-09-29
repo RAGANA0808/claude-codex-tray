@@ -118,6 +118,7 @@ def collect() -> str:
     if cal.exists():
         try:
             d = json.loads(cal.read_text(encoding="utf-8"))
+            add(f"  描画方式   : {'レイヤード' if d.get('layered') else '通常の子ウィンドウ'}")
             add(f"  色較正     : {d.get('verdict')} offset={d.get('offset')} "
                 f"black={d.get('black')} gray={d.get('gray')} ({_fmt_age(d.get('at', 0))})")
         except Exception as e:
