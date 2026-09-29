@@ -26,6 +26,7 @@ import autostart
 import icon as icon_mod
 import paths
 from dashboard import Dashboard
+import taskbar_space
 import taskbar_widget
 from taskbar_widget import TaskbarWidget
 
@@ -33,6 +34,14 @@ taskbar_widget.set_dpi_awareness()
 
 HERE = paths.user_data_dir()
 APP_NAME = "Claude / Codex Usage Monitor"
+
+SIZE_CHOICES = (
+    ("auto", "自動（推奨）— タスクバーの空きに合わせて切り替え"),
+    ("full", "標準 — メーター・数値・残り時間"),
+    ("compact", "コンパクト — 短いメーター・数値・残り時間"),
+    ("slim", "スリム — 数値・残り時間"),
+    ("mini", "ミニ — 数値のみ"),
+)
 
 
 class App:
@@ -293,11 +302,23 @@ class App:
                            command=lambda: guard(v_codex, v_claude)).pack(anchor="w")
             warn.pack(anchor="w", pady=(6, 0))
 
+            tk.Label(frame, text="表示サイズ",
+                     font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(14, 0))
+            tk.Label(frame, foreground="#666", justify="left",
+                     text="「自動」はアプリのアイコンに重ならない幅を選びます。\n"
+                          "ノートパソコンなど画面の狭い PC では自動で細くなります。"
+                     ).pack(anchor="w", pady=(2, 6))
+            want = str(self.cfg.get("widget_size", "auto")).lower()
+            v_size = tk.StringVar(value=want if want in dict(SIZE_CHOICES) else "auto")
+            for value, label in SIZE_CHOICES:
+                tk.Radiobutton(frame, text=label, value=value,
+                               variable=v_size).pack(anchor="w")
+
             btns = tk.Frame(frame)
             btns.pack(fill="x", pady=(14, 0))
 
             def apply_and_close():
-                self._set_sides(v_claude.get(), v_codex.get())
+                self._set_display(v_claude.get(), v_codex.get(), v_size.get())
                 win.destroy()
 
             tk.Button(btns, text="OK", width=10,
@@ -311,13 +332,15 @@ class App:
 
         self.root.after(0, build)
 
-    def _set_sides(self, show_claude: bool, show_codex: bool):
+    def _set_display(self, show_claude: bool, show_codex: bool, size: str):
         if not (show_claude or show_codex):
             return
         self.cfg["show_claude"] = bool(show_claude)
         self.cfg["show_codex"] = bool(show_codex)
+        self.cfg["widget_size"] = size
         self._save_cfg_field("show_claude", bool(show_claude))
         self._save_cfg_field("show_codex", bool(show_codex))
+        self._save_cfg_field("widget_size", size)
         if self.widget is not None:
             self.widget.relayout()
 
@@ -502,6 +525,9 @@ class App:
     # ---------- entrypoint ----------
 
     def run(self):
+        # Start mapping the taskbar's free room now, so the first map is
+        # ready by the time the widget needs to know how wide it may be.
+        taskbar_space.watcher()
         # Tk root and widgets must live on main thread.
         self.root = tk.Tk()
         self.root.withdraw()

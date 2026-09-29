@@ -26,6 +26,7 @@ a = Analysis(
         'diagnostics',
         'autostart',
         'paths',
+        'taskbar_space',
         'tkinter.messagebox',
     ],
     hookspath=[],

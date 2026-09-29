@@ -1,16 +1,18 @@
 """Frameless always-on-top "taskbar widget" — sits at the bottom of the screen so
 it visually lives on the Windows 11 taskbar strip.
 
-Layout (440 x 52, two halves):
+Layout at full size (narrower sizes drop the meter, then the countdown — see
+SIZES; which one is used depends on the free room, see taskbar_space):
 
-    | [Claude] 5h ████░░ 6%   | [Codex] 5h ███░░░ 15% |
-    |          7d ██░░░░ 19%  |         7d ███░░░ 39% |
+    | [Claude] 5h ████░░ 6%  3h  F ██░░ 34% 3d | [Codex] 5h ███░░░ 15% 58m |
+    |          7d ██░░░░ 19% 4d                |         7d ███░░░ 39% 5d  |
 """
 from __future__ import annotations
 import ctypes
 import tkinter as tk
 
 import paths
+import taskbar_space
 from typing import Callable
 
 
@@ -36,7 +38,7 @@ _SW_SHOWNOACTIVATE = 4
 # we keep it at the top of the parent's Z-order.
 TASKBAR_CLASS = "Shell_TrayWnd"
 TRAY_NOTIFY_CLASS = "TrayNotifyWnd"
-EMBED_GAP = 24          # px kept clear between the widget and the clock
+EMBED_GAP = 16          # px (at 100%) kept clear between the widget and the clock
 FLOAT_RAISE_MS = 250    # how often a floating bar re-claims the top slot
 
 # The Windows 11 taskbar composites an embedded child window ADDITIVELY over
@@ -104,8 +106,32 @@ INTER_GROUP_GAP = 8
 CAP_W = 12
 PCT_W = 22
 TIME_W = 20
-GROUP_W = CAP_W + GAP + BAR_W + GAP + PCT_W + GAP + TIME_W
+CAP_GAP = 3
+TIME_GAP = 3
+SHOW_TIME = True
+GROUP_W = CAP_W + CAP_GAP + BAR_W + GAP + PCT_W + TIME_GAP + TIME_W
 WIDTH = 500
+
+# A laptop taskbar has far less free room than the full bar needs, so there
+# are narrower layouts, richest first. Each step drops a detail rather than
+# squeezing text together: the meter shortens, then goes (the number takes
+# over its warn/danger colour), then the reset countdown goes.
+SIZES = ("full", "compact", "slim", "mini")
+# px at 100%. cap_gap follows the caption: without a meter in between it has
+# to be wider, or "5h" and "100%" read as one word.
+_SIZE_SPEC = {
+    "full":    dict(icon=28, gap_icon=6, pad=8, inter=8, cap_gap=3, bar=36,
+                    gap=3, time_gap=3, time=True),
+    "compact": dict(icon=24, gap_icon=5, pad=6, inter=6, cap_gap=2, bar=18,
+                    gap=2, time_gap=4, time=True),
+    "slim":    dict(icon=22, gap_icon=4, pad=6, inter=7, cap_gap=5, bar=0,
+                    gap=2, time_gap=4, time=True),
+    "mini":    dict(icon=22, gap_icon=4, pad=5, inter=7, cap_gap=5, bar=0,
+                    gap=2, time_gap=0, time=False),
+}
+SIZE = "full"
+EMBED_MARGIN = 8        # px (at 100%) kept clear of app buttons
+GROW_DELAY_S = 3.0      # room must stay free this long before the bar widens
 
 FONT_CAP = ("Segoe UI", 8)
 FONT_PCT = ("Segoe UI Semibold", 9)
@@ -183,23 +209,16 @@ def init_scale(root, cfg: dict | None = None) -> float:
     """Derive the pixel scale from the real DPI, then size every column from
     the font actually in use. Tk scales point-sized fonts by the same factor,
     so only pixel geometry is adjusted here."""
-    global SCALE, HEIGHT, ICON_PX
-    global PAD_X, GAP_ICON, GAP, BAR_W, BAR_H, ROW_Y_TOP, INTER_GROUP_GAP
-    global CAP_W, PCT_W, TIME_W, GROUP_W
+    global SCALE, HEIGHT, BAR_H, ROW_Y_TOP
+    global CAP_W, PCT_W, TIME_W
     try:
         SCALE = max(1.0, float(root.winfo_fpixels("1i")) / 96.0)
     except Exception:
         SCALE = 1.0
 
-    def sc(v: float) -> int:
-        return int(round(v * SCALE))
-
     apply_theme(cfg or {})
-    HEIGHT = int(round(BASE_HEIGHT * SCALE))
-    ICON_PX = int(round(BASE_ICON_PX * SCALE))
-    PAD_X, GAP_ICON, GAP = sc(8), sc(6), sc(3)
-    BAR_W, BAR_H, ROW_Y_TOP = sc(36), sc(12), sc(6)
-    INTER_GROUP_GAP = sc(8)
+    HEIGHT = sc(BASE_HEIGHT)
+    BAR_H, ROW_Y_TOP = sc(12), sc(6)
 
     def widest(font, samples) -> int:
         try:
@@ -213,9 +232,34 @@ def init_scale(root, cfg: dict | None = None) -> float:
     CAP_W = max(widest(FONT_CAP, ("5h", "7d", "F")), sc(12))
     PCT_W = max(widest(FONT_PCT, ("100%", "—")), sc(22))
     TIME_W = max(widest(FONT_TIME, ("<1m", "now", "10d", "23h", "59m")), sc(20))
-    GROUP_W = CAP_W + GAP + BAR_W + GAP + PCT_W + GAP + TIME_W
     apply_layout(cfg or {})
     return SCALE
+
+
+def sc(v: float) -> int:
+    return int(round(v * SCALE))
+
+
+def sizes_for(cfg: dict) -> tuple[str, ...]:
+    """The layouts the bar may use, richest first. `widget_size` in
+    config.json pins one; "auto" (default) lets the free room decide."""
+    want = str(cfg.get("widget_size", "auto")).lower()
+    return (want,) if want in _SIZE_SPEC else SIZES
+
+
+def _geometry(size: str) -> dict:
+    s = _SIZE_SPEC[size]
+    g = {"ICON_PX": sc(s["icon"]), "GAP_ICON": sc(s["gap_icon"]),
+         "PAD_X": sc(s["pad"]), "INTER_GROUP_GAP": sc(s["inter"]),
+         "CAP_GAP": sc(s["cap_gap"]), "GAP": sc(s["gap"]), "BAR_W": sc(s["bar"]),
+         "TIME_GAP": sc(s["time_gap"]), "SHOW_TIME": s["time"]}
+    w = CAP_W + g["CAP_GAP"] + PCT_W
+    if g["BAR_W"]:
+        w += g["BAR_W"] + g["GAP"]
+    if g["SHOW_TIME"]:
+        w += g["TIME_GAP"] + TIME_W
+    g["GROUP_W"] = w
+    return g
 
 
 def sides_shown(cfg: dict) -> tuple[bool, bool]:
@@ -225,27 +269,52 @@ def sides_shown(cfg: dict) -> tuple[bool, bool]:
     return (True, True) if not (claude or codex) else (claude, codex)
 
 
-def side_width(with_extra: bool) -> int:
-    """Claude carries a second group on its top row (the Fable meter), so the
-    two sides are sized independently instead of splitting the bar in half."""
-    w = ICON_PX + GAP_ICON + GROUP_W
+def _side_width(g: dict, with_extra: bool) -> int:
+    w = g["ICON_PX"] + g["GAP_ICON"] + g["GROUP_W"]
     if with_extra:
-        w += INTER_GROUP_GAP + GROUP_W
+        w += g["INTER_GROUP_GAP"] + g["GROUP_W"]
     return w
 
 
-def apply_layout(cfg: dict) -> int:
-    """Set WIDTH from the columns and from which sides are switched on."""
-    global WIDTH
+def _total_width(cfg: dict, g: dict) -> int:
     show_claude, show_codex = sides_shown(cfg)
-    total = PAD_X
+    pad = g["PAD_X"]
+    total = pad
     if show_claude:
-        total += side_width(True) + PAD_X
+        total += _side_width(g, True) + pad
     if show_claude and show_codex:
-        total += PAD_X
+        total += pad
     if show_codex:
-        total += side_width(False) + PAD_X
-    WIDTH = total
+        total += _side_width(g, False) + pad
+    return total
+
+
+def side_width(with_extra: bool) -> int:
+    """Claude carries a second group on its top row (the Fable meter), so the
+    two sides are sized independently instead of splitting the bar in half."""
+    return _side_width({"ICON_PX": ICON_PX, "GAP_ICON": GAP_ICON,
+                        "GROUP_W": GROUP_W, "INTER_GROUP_GAP": INTER_GROUP_GAP},
+                       with_extra)
+
+
+def layout_width(cfg: dict, size: str) -> int:
+    """How wide the bar would be in `size`, without switching to it."""
+    return _total_width(cfg, _geometry(size))
+
+
+def apply_layout(cfg: dict, size: str | None = None) -> int:
+    """Switch the module geometry to `size` (default: keep the current one)
+    and set WIDTH from the columns and from which sides are switched on."""
+    global SIZE, WIDTH, ICON_PX, GAP_ICON, PAD_X, INTER_GROUP_GAP, GAP
+    global CAP_GAP, BAR_W, TIME_GAP, SHOW_TIME, GROUP_W
+    if size in _SIZE_SPEC:
+        SIZE = size
+    g = _geometry(SIZE)
+    ICON_PX, GAP_ICON, PAD_X = g["ICON_PX"], g["GAP_ICON"], g["PAD_X"]
+    INTER_GROUP_GAP, GAP, BAR_W = g["INTER_GROUP_GAP"], g["GAP"], g["BAR_W"]
+    CAP_GAP, TIME_GAP = g["CAP_GAP"], g["TIME_GAP"]
+    SHOW_TIME, GROUP_W = g["SHOW_TIME"], g["GROUP_W"]
+    WIDTH = _total_width(cfg, g)
     return WIDTH
 
 HERE = paths.exe_dir()
@@ -516,6 +585,19 @@ class TaskbarWidget:
         self._pending_right = 0
         self._matched_bg: str | None = None
         self._drag_grab = 0
+        self._dragging = False
+        self._drag_moved = False
+        self._grow: tuple[tuple[str, int], float] | None = None
+        self._grow_timer = None
+        self._icons: dict[tuple[str, int], tk.PhotoImage | None] = {}
+
+        # Map of the taskbar's free room, kept current on another thread.
+        # Waiting briefly for the first map avoids opening at full width over
+        # a laptop's app buttons and shrinking a moment later.
+        self._watch = taskbar_space.watcher()
+        self._watch.first.wait(0.5)
+        self._space_seq = self._watch.seq
+        self._space = self._watch.latest
 
         self.win = tk.Toplevel(root)
         self.win.overrideredirect(True)
@@ -540,13 +622,12 @@ class TaskbarWidget:
         )
         self.canvas.pack(fill="both", expand=True)
 
-        # Cache PhotoImages here so Tk doesn't garbage-collect them.
-        self._icon_claude = _load_app_icon("claude", ICON_PX)
-        self._icon_codex = _load_app_icon("codex", ICON_PX)
+        self._load_icons()
 
         # Drag-to-move
         self._drag_dx = 0
         self._drag_dy = 0
+        self._press_x = 0
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_motion)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
@@ -555,6 +636,17 @@ class TaskbarWidget:
 
         self._apply_mode()
         self._reassert_after()
+        self._follow_space()
+
+    def _load_icons(self):
+        # Cache PhotoImages here so Tk doesn't garbage-collect them; one set
+        # per icon size, since the narrower layouts use smaller icons.
+        for name in ("claude", "codex"):
+            key = (name, ICON_PX)
+            if key not in self._icons:
+                self._icons[key] = _load_app_icon(name, ICON_PX)
+        self._icon_claude = self._icons[("claude", ICON_PX)]
+        self._icon_codex = self._icons[("codex", ICON_PX)]
 
     # --- colour ----------------------------------------------------
 
@@ -769,7 +861,126 @@ class TaskbarWidget:
         self._taskbar = 0
 
     def _default_right_offset(self, tb: int) -> int:
-        return _tray_notify_width(tb) + EMBED_GAP
+        return _tray_notify_width(tb) + sc(EMBED_GAP)
+
+    # --- choosing a size and a spot ------------------------------------
+
+    def _anchor(self, tb: tuple[int, int, int, int]) -> tuple[int, bool] | None:
+        """(screen x, grows_left) of an edge the user dragged the bar to, or
+        None while the bar is placed automatically."""
+        if self.embedded:
+            saved = self.cfg.get("widget_taskbar_offset") or {}
+            if "right" not in saved:
+                return None
+            return tb[2] - int(saved["right"]), True
+        saved = self.cfg.get("widget_position") or {}
+        if "x" not in saved:
+            return None
+        return int(saved["x"]), False
+
+    def _choose(self, tb: tuple[int, int, int, int]) -> tuple[str, int]:
+        """The layout and the screen x for a bar on the taskbar at `tb`."""
+        sizes = sizes_for(self.cfg)
+        widths = [layout_width(self.cfg, s) for s in sizes]
+        anchor = self._anchor(tb)
+        space = self._space
+        if space is None or (space.taskbar[0], space.taskbar[2]) != (tb[0], tb[2]):
+            # No map of the buttons (UI Automation unavailable, or the map is
+            # from before the taskbar moved): the old spot beside the clock.
+            w = widths[0]
+            if anchor is None:
+                return sizes[0], tb[2] - self._default_right_offset(_find_taskbar()) - w
+            edge, grows_left = anchor
+            return sizes[0], (edge - w) if grows_left else edge
+        margin = sc(EMBED_MARGIN)
+        if anchor is None:
+            i, x = taskbar_space.fit_home(space, widths, margin, sc(EMBED_GAP))
+            return sizes[i], x
+        edge, grows_left = anchor
+        i = taskbar_space.fit_anchored(space, widths, margin, edge, grows_left)
+        return sizes[i], (edge - widths[i]) if grows_left else edge
+
+    def _target(self, tb: tuple[int, int, int, int]) -> tuple[str, int]:
+        """_choose(), with x clamped the way the bar will actually be placed."""
+        size, x = self._choose(tb)
+        w = layout_width(self.cfg, size)
+        lo, hi = (tb[0], tb[2] - w) if self.embedded else (
+            0, self.win.winfo_screenwidth() - w)
+        return size, max(lo, min(x, max(lo, hi)))
+
+    def _set_size(self, size: str) -> None:
+        before = (WIDTH, ICON_PX)
+        apply_layout(self.cfg, size)
+        if (WIDTH, ICON_PX) == before:
+            return
+        self._load_icons()
+        try:
+            self.canvas.configure(width=WIDTH, height=HEIGHT)
+            self.win.geometry(f"{WIDTH}x{HEIGHT}")
+        except tk.TclError:
+            pass
+
+    def _follow_space(self):
+        """Refit whenever the watcher publishes a new map of the taskbar."""
+        try:
+            if (self._watch.seq != self._space_seq and not self._dragging
+                    and not self._calibrating):
+                self._space_seq = self._watch.seq
+                self._space = self._watch.latest
+                self._refit()
+            self.win.after(400, self._follow_space)
+        except tk.TclError:
+            return
+
+    def _covers_something(self, rect) -> bool:
+        space = self._space
+        if space is None or rect is None:
+            return False
+        return any(lo < rect[2] and hi > rect[0] for lo, hi in space.blocks)
+
+    def _refit(self):
+        """Move or resize the bar if the free room around it has changed.
+
+        Anything that stops the bar covering a button happens at once.
+        Growing back while the bar is already clear waits a few seconds: a
+        window that opens and closes quickly should not make the bar pulse.
+        """
+        if self._dragging or self._calibrating or not self._visible:
+            return
+        tb = _window_rect(self._taskbar if self.embedded else _find_taskbar())
+        if tb is None:
+            return
+        if not self.embedded and not self._float_on_taskbar(tb):
+            # Parked on the desktop: nothing to dodge, so the richest layout.
+            if SIZE != sizes_for(self.cfg)[0]:
+                self._place_initial()
+                self.redraw_last()
+            return
+        size, x = self._target(tb)
+        cur = _window_rect(self._hwnd)
+        if size == SIZE and cur is not None and cur[0] == x:
+            self._grow = None
+            return
+        if (SIZES.index(size) < SIZES.index(SIZE)
+                and not self._covers_something(cur)):
+            import time as _t
+            now = _t.monotonic()
+            if self._grow is None or self._grow[0] != (size, x):
+                self._grow = ((size, x), now)
+            if now - self._grow[1] < GROW_DELAY_S:
+                if self._grow_timer is None:
+                    self._grow_timer = self.win.after(1000, self._grow_tick)
+                return
+        self._grow = None
+        if self.embedded:
+            self._place_embedded()
+        else:
+            self._place_initial()
+        self.redraw_last()
+
+    def _grow_tick(self):
+        self._grow_timer = None
+        self._refit()
 
     def _place_embedded(self):
         self._blank()
@@ -777,43 +988,61 @@ class TaskbarWidget:
         if r is None:
             return
         tb_w, tb_h = r[2] - r[0], r[3] - r[1]
+        size, x_screen = self._target(r)
+        self._set_size(size)
         h = min(HEIGHT, tb_h)
-        saved = self.cfg.get("widget_taskbar_offset") or {}
-        right = int(saved.get("right", self._default_right_offset(self._taskbar)))
-        right = max(0, min(right, max(0, tb_w - WIDTH)))
-        self._pending_right = right
-        x = max(0, tb_w - WIDTH - right)
+        x = x_screen - r[0]
+        self._pending_right = tb_w - WIDTH - x
         y = max(0, (tb_h - h) // 2)
         ctypes.windll.user32.SetWindowPos(
             self._hwnd, _HWND_TOP, x, y, WIDTH, h,
             _SWP_NOACTIVATE | _SWP_SHOWWINDOW)
 
     def reset_position(self):
-        """Back to the default spot for whichever mode is active."""
+        """Back to the automatic spot for whichever mode is active."""
         if self.embedded:
             self.cfg.pop("widget_taskbar_offset", None)
             self._place_embedded()
             self.redraw_last()
-            if self.save_taskbar_offset:
-                self.save_taskbar_offset(self._pending_right)
         else:
             self.cfg.pop("widget_position", None)
             self._place_initial()
+            self.redraw_last()
 
     # --- positioning ----------------------------------------------
+
+    def _float_on_taskbar(self, tb: tuple[int, int, int, int]) -> bool:
+        """A floating bar the user parked away from the taskbar has nothing
+        to dodge, so it keeps its size wherever it is."""
+        saved = self.cfg.get("widget_position") or {}
+        if "y" not in saved:
+            return True
+        mid = int(saved["y"]) + HEIGHT // 2
+        return tb[1] <= mid <= tb[3]
 
     def _place_initial(self):
         sx = self.win.winfo_screenwidth()
         sy = self.win.winfo_screenheight()
         saved = self.cfg.get("widget_position") or {}
-        tb_h = _get_taskbar_height()
-        default_x = (sx - WIDTH) // 2
-        default_y = sy - tb_h + max(0, (tb_h - HEIGHT) // 2)
-        x = int(saved.get("x", default_x))
-        y = int(saved.get("y", default_y))
+        tb = _window_rect(_find_taskbar())
+        if tb is not None and self._float_on_taskbar(tb):
+            # Same room-finding as the embedded bar; it used to default to the
+            # middle of the screen, right over Windows 11's centred buttons.
+            size, x = self._target(tb)
+            self._set_size(size)
+            y = int(saved.get("y", tb[1] + max(0, (tb[3] - tb[1] - HEIGHT) // 2)))
+        else:
+            self._set_size(sizes_for(self.cfg)[0])
+            tb_h = _get_taskbar_height()
+            x = int(saved.get("x", (sx - WIDTH) // 2))
+            y = int(saved.get("y", sy - tb_h + max(0, (tb_h - HEIGHT) // 2)))
         x = max(0, min(x, sx - WIDTH))
         y = max(0, min(y, sy - HEIGHT))
         self.win.geometry(f"{WIDTH}x{HEIGHT}+{x}+{y}")
+        # Apply it now. Left pending, the -topmost raise that follows made Tk
+        # re-read the unmapped window's position, so a bar started in float
+        # mode opened in the top-left corner of the screen.
+        self.win.update_idletasks()
 
     def _reassert_after(self):
         try:
@@ -850,6 +1079,9 @@ class TaskbarWidget:
                        self._reassert_after)
 
     def _on_press(self, ev):
+        self._dragging = True
+        self._drag_moved = False
+        self._press_x = ev.x_root
         if self.embedded:
             r = _window_rect(self._hwnd)
             self._drag_grab = ev.x_root - (r[0] if r else ev.x_root)
@@ -861,6 +1093,9 @@ class TaskbarWidget:
         self._drag_dy = ev.y_root - self.win.winfo_y()
 
     def _on_motion(self, ev):
+        if abs(ev.x_root - self._press_x) < 3 and not self._drag_moved:
+            return    # a click, not a drag
+        self._drag_moved = True
         if self.embedded:
             # Inside the taskbar only the horizontal slot is meaningful; the
             # 72px strip fixes the vertical position for us.
@@ -882,12 +1117,21 @@ class TaskbarWidget:
         self.win.geometry(f"+{x}+{y}")
 
     def _on_release(self, _ev):
+        self._dragging = False
+        # Only a real drag pins the bar. A click (or the double-click that
+        # opens the dashboard) used to save the spot too, which silently
+        # switched off the automatic placement.
+        if not self._drag_moved:
+            self.redraw_last()
+            return
         if self.embedded:
             if self.save_taskbar_offset:
                 self.save_taskbar_offset(int(self._pending_right))
-            self.redraw_last()
-            return
-        self.save_position(self.win.winfo_x(), self.win.winfo_y())
+        else:
+            self.save_position(self.win.winfo_x(), self.win.winfo_y())
+        # Dropped somewhere narrower (or wider): fit the room found there.
+        self._refit()
+        self.redraw_last()
 
     def _on_right_click(self, ev):
         self.on_right_click_menu(ev.x_root, ev.y_root)
@@ -900,8 +1144,10 @@ class TaskbarWidget:
             # A WS_CHILD window is not a Tk toplevel any more, so deiconify()
             # no longer reaches it — drive visibility through the API.
             ctypes.windll.user32.ShowWindow(self._hwnd, _SW_SHOWNOACTIVATE)
-            return
-        self.win.deiconify()
+        else:
+            self.win.deiconify()
+        # The buttons may have moved while the bar was hidden.
+        self._refit()
 
     def hide(self):
         self._visible = False
@@ -923,18 +1169,17 @@ class TaskbarWidget:
         self.relayout()
 
     def relayout(self):
-        """Re-measure the bar after a settings change and put it back."""
-        apply_layout(self.cfg)
+        """Re-measure the bar after a settings change and put it back.
+        The size is chosen again too: hiding a side or pinning a layout
+        changes what fits."""
         try:
             self._blank()
-            self.canvas.configure(width=WIDTH, height=HEIGHT)
-            self.win.geometry(f"{WIDTH}x{HEIGHT}")
+            if self.embedded:
+                self._place_embedded()
+            else:
+                self._place_initial()
         except tk.TclError:
             return
-        if self.embedded:
-            self._place_embedded()
-        else:
-            self._place_initial()
         self.redraw_last()
 
     def redraw_last(self):
@@ -957,6 +1202,7 @@ class TaskbarWidget:
             pass
 
     def destroy(self):
+        self._visible = False          # stops any pending refit from placing us
         self._blank()
         # Detach from the taskbar first: destroying a live child of
         # Shell_TrayWnd from Tk's side is more fragile than unparenting.
@@ -983,9 +1229,6 @@ class TaskbarWidget:
 
         c = self.canvas
         c.delete("all")
-
-        def sc(v: float) -> int:
-            return int(round(v * SCALE))
 
         if not self.embedded:
             # Re-match on every redraw: the strip's tint moves with the
@@ -1045,28 +1288,34 @@ class TaskbarWidget:
                            fill_color: str | None = None):
                 c.create_text(gx + cap_w / 2, y + bar_h / 2,
                               text=caption, fill=self._adj(FG_DIM),
-                              font=("Segoe UI", 8))
-                bxx = gx + cap_w + GAP
-                c.create_rectangle(bxx, y, bxx + bar_w, y + bar_h,
-                                   fill=self._adj(BG_BAR), outline="")
-                if pct is not None:
-                    fw = int(bar_w * max(0, min(100, pct)) / 100)
-                    if fw > 0:
-                        color = fill_color if fill_color else _pick_color(pct, warn, danger)
-                        c.create_rectangle(
-                            bxx, y, bxx + fw, y + bar_h,
-                            fill=self._adj(color), outline="",
-                        )
+                              font=FONT_CAP)
+                bxx = gx + cap_w + CAP_GAP
+                color = fill_color if fill_color else _pick_color(pct, warn, danger)
+                ink = FG_LABEL
+                if bar_w:
+                    c.create_rectangle(bxx, y, bxx + bar_w, y + bar_h,
+                                       fill=self._adj(BG_BAR), outline="")
+                    if pct is not None:
+                        fw = int(bar_w * max(0, min(100, pct)) / 100)
+                        if fw > 0:
+                            c.create_rectangle(
+                                bxx, y, bxx + fw, y + bar_h,
+                                fill=self._adj(color), outline="",
+                            )
+                    bxx += bar_w + GAP
+                else:
+                    # No meter to carry the warn/danger colour, so the
+                    # number carries it.
+                    ink = FG_DIM if pct is None else color
                 txt = "—" if pct is None else f"{pct:.0f}%"
-                c.create_text(bxx + bar_w + GAP, y + bar_h / 2,
+                c.create_text(bxx, y + bar_h / 2,
                               text=txt, anchor="w",
-                              fill=self._adj(FG_LABEL),
-                              font=("Segoe UI Semibold", 9))
-                cd = _format_countdown(reset_epoch)
+                              fill=self._adj(ink), font=FONT_PCT)
+                cd = _format_countdown(reset_epoch) if SHOW_TIME else ""
                 if cd:
-                    c.create_text(bxx + bar_w + GAP + pct_w + GAP, y + bar_h / 2,
+                    c.create_text(bxx + pct_w + TIME_GAP, y + bar_h / 2,
                                   text=cd, anchor="w",
-                                  fill=self._adj(FG_DIM), font=("Segoe UI", 9))
+                                  fill=self._adj(FG_DIM), font=FONT_TIME)
 
             draw_group(bx, row_y_top, "5h", pct_a, reset_a)
             if extra_shown or extra_pct is not None:

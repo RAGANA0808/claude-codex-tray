@@ -126,6 +126,29 @@ def collect() -> str:
         add("  色較正     : まだ実行されていません")
     add("")
 
+    add("=== タスクバーの空き ===")
+    try:
+        import taskbar_space
+        import taskbar_widget
+        watch = taskbar_space.watcher()
+        watch.first.wait(2)
+        sp = watch.latest
+        if not watch.available:
+            add("  測定       : ★UI Automation が使えません（帯は時計の左に固定）")
+        elif sp is None:
+            add("  測定       : ★タスクバーを読めませんでした（帯は時計の左に固定）")
+        else:
+            home = sp.home()
+            add(f"  タスクバー : x={sp.taskbar[0]}..{sp.taskbar[2]}  時計の左端 x={sp.tray_left}")
+            add("  空き       : " + (", ".join(f"{a}..{b} ({b - a}px)" for a, b in sp.runs())
+                                    or "なし"))
+            add("  時計の左   : " + (f"{home[1] - home[0]}px" if home
+                                    else "★なし（アイコンが時計まで並んでいます）"))
+        add(f"  表示サイズ : {taskbar_widget.SIZE}（幅 {taskbar_widget.WIDTH}px）")
+    except Exception as e:
+        add(f"  ★取得失敗 {type(e).__name__}: {e}")
+    add("")
+
     add("=== データソース ===")
     for label, key, sub in [("Claude ログ", "claude_dir", ".claude/projects"),
                             ("Codex ログ", "codex_dir", ".codex/sessions")]:

@@ -5,8 +5,8 @@
 # things that helps without a code-signing certificate.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 10, 0),
-    prodvers=(1, 0, 10, 0),
+    filevers=(1, 0, 14, 0),
+    prodvers=(1, 0, 14, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -20,12 +20,12 @@ VSVersionInfo(
         '041104b0',
         [StringStruct('CompanyName', 'RAGANA0808'),
          StringStruct('FileDescription', 'Claude / Codex Usage Monitor'),
-         StringStruct('FileVersion', '1.0.10'),
+         StringStruct('FileVersion', '1.0.14'),
          StringStruct('InternalName', 'ClaudeCodexUsage'),
          StringStruct('LegalCopyright', 'MIT License'),
          StringStruct('OriginalFilename', 'ClaudeCodexUsage.exe'),
          StringStruct('ProductName', 'Claude / Codex Usage Monitor'),
-         StringStruct('ProductVersion', '1.0.10'),
+         StringStruct('ProductVersion', '1.0.14'),
          StringStruct('Comments',
                       'https://github.com/RAGANA0808/claude-codex-tray')])
     ]),

@@ -11,7 +11,8 @@ def restore_globals():
     keep = {k: getattr(tw, k) for k in
             ("SCALE", "WIDTH", "HEIGHT", "ICON_PX", "PAD_X", "GAP_ICON", "GAP",
              "BAR_W", "BAR_H", "ROW_Y_TOP", "INTER_GROUP_GAP",
-             "CAP_W", "PCT_W", "TIME_W", "GROUP_W")}
+             "CAP_W", "PCT_W", "TIME_W", "GROUP_W",
+             "SIZE", "CAP_GAP", "TIME_GAP", "SHOW_TIME")}
     yield
     for k, v in keep.items():
         setattr(tw, k, v)
@@ -54,8 +55,15 @@ def test_width_covers_every_column():
 
 
 def test_group_width_is_the_sum_of_its_columns():
-    tw.apply_layout({})
-    assert tw.GROUP_W == tw.CAP_W + tw.GAP + tw.BAR_W + tw.GAP + tw.PCT_W + tw.GAP + tw.TIME_W
+    tw.apply_layout({}, "full")
+    assert tw.GROUP_W == (tw.CAP_W + tw.CAP_GAP + tw.BAR_W + tw.GAP + tw.PCT_W
+                          + tw.TIME_GAP + tw.TIME_W)
+    tw.apply_layout({}, "slim")          # no meter: caption, number, countdown
+    assert tw.BAR_W == 0
+    assert tw.GROUP_W == tw.CAP_W + tw.CAP_GAP + tw.PCT_W + tw.TIME_GAP + tw.TIME_W
+    tw.apply_layout({}, "mini")          # numbers only
+    assert not tw.SHOW_TIME
+    assert tw.GROUP_W == tw.CAP_W + tw.CAP_GAP + tw.PCT_W
 
 
 # --- the overflow this file exists for --------------------------------
@@ -270,3 +278,163 @@ def test_draw_side_accepts_a_shown_but_unknown_extra():
     assert "extra_shown" in src
     # the slot is drawn when asked for, even with no value to put in it
     assert "if extra_shown or extra_pct is not None:" in src
+
+
+# --- narrower layouts for taskbars without room (laptops) ---------------
+
+SIDES = ({}, {"show_codex": False}, {"show_claude": False})
+
+
+@pytest.mark.parametrize("sides", SIDES)
+def test_each_size_is_narrower_than_the_one_before(sides):
+    widths = [tw.layout_width(sides, s) for s in tw.SIZES]
+    assert widths == sorted(widths, reverse=True)
+    assert len(set(widths)) == len(widths)
+
+
+def test_layout_width_matches_what_apply_layout_sets():
+    for size in tw.SIZES:
+        assert tw.apply_layout({}, size) == tw.layout_width({}, size)
+        assert tw.SIZE == size
+
+
+def test_sizes_follow_the_setting():
+    assert tw.sizes_for({}) == tw.SIZES
+    assert tw.sizes_for({"widget_size": "auto"}) == tw.SIZES
+    assert tw.sizes_for({"widget_size": "slim"}) == ("slim",)
+    assert tw.sizes_for({"widget_size": "huge"}) == tw.SIZES   # unknown -> auto
+
+
+@pytest.fixture(scope="module")
+def tk_root():
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except Exception as e:
+        pytest.skip(f"no display for Tk: {e!r}")
+    root.withdraw()
+    yield root
+    root.destroy()
+
+
+def _widest_snapshot():
+    """Every value at its widest: 100% and a two-digit day countdown."""
+    import time
+    import parsers
+    later = time.time() + 10 * 86400 + 60
+    s = parsers.Snapshot(claude=parsers.ClaudeSnapshot(), codex=parsers.CodexSnapshot())
+    c = s.claude
+    c.available = True
+    c.pct_5h = c.pct_7d = 100.0
+    c.block_resets_at = c.week_resets_at = later
+    c.fable_available = True
+    c.fable_pct, c.fable_resets_at = 100.0, later
+    x = s.codex
+    x.available = x.has_primary = x.has_secondary = True
+    x.primary_pct = x.secondary_pct = 100.0
+    x.primary_resets_at = x.secondary_resets_at = later
+    return s
+
+
+@pytest.mark.parametrize("size", tw.SIZES)
+@pytest.mark.parametrize("sides", SIDES)
+def test_every_layout_keeps_its_text_apart_and_inside_the_bar(tk_root, size, sides):
+    import itertools
+    import tkinter as tk
+    import types
+    tw.init_scale(tk_root, {})
+    cfg = dict(sides, widget_size=size)
+    tw.apply_layout(cfg, size)
+    canvas = tk.Canvas(tk_root, width=tw.WIDTH, height=tw.HEIGHT)
+    w = types.SimpleNamespace(canvas=canvas, embedded=False, cfg=cfg,
+                              _calibrating=False, _icon_claude=None, _icon_codex=None)
+    w._adj = lambda color: color
+    w._apply_colors = lambda: None
+    w.float_is_transparent = lambda: False
+    try:
+        tw.TaskbarWidget.render(w, _widest_snapshot(), cfg)
+        x0, _y0, x1, _y1 = canvas.bbox("all")
+        assert 0 <= x0 and x1 <= tw.WIDTH
+        texts = [canvas.bbox(i) for i in canvas.find_all() if canvas.type(i) == "text"]
+        assert texts
+        for a, b in itertools.combinations(texts, 2):
+            apart_x = a[2] <= b[0] or b[2] <= a[0]
+            apart_y = a[3] <= b[1] or b[3] <= a[1]
+            assert apart_x or apart_y, (size, a, b)
+    finally:
+        canvas.destroy()
+
+
+def test_meterless_layouts_colour_the_number_instead():
+    """The meter carried the warn/danger colour; without it the number must."""
+    src = Path(tw.__file__).read_text(encoding="utf-8")
+    assert "ink = FG_DIM if pct is None else color" in src
+
+
+# --- choosing where and how wide --------------------------------------
+
+def _fake_widget(space, cfg=None, embedded=True):
+    import types
+    w = types.SimpleNamespace(cfg=cfg or {}, embedded=embedded, _space=space)
+    w._anchor = lambda tb: tw.TaskbarWidget._anchor(w, tb)
+    w._default_right_offset = lambda tb: 0
+    return w
+
+
+def test_a_narrow_home_gets_a_narrower_layout():
+    import taskbar_space as ts
+    widths = [tw.layout_width({}, s) for s in tw.SIZES]
+    margin, gap = tw.sc(tw.EMBED_MARGIN), tw.sc(tw.EMBED_GAP)
+    tray = 3000
+    room = widths[1] + margin + gap + 1          # compact fits, full does not
+    space = ts.Space((0, 0, 3200, 72), tray,
+                     ((100, tray - room), (tray, 3200)))
+    size, x = tw.TaskbarWidget._choose(_fake_widget(space), (0, 0, 3200, 72))
+    assert size == "compact"
+    assert x + widths[1] == tray - gap
+
+
+def test_a_pinned_size_is_kept_even_when_room_is_short():
+    import taskbar_space as ts
+    space = ts.Space((0, 0, 3200, 72), 3000, ((100, 2900), (3000, 3200)))
+    size, _x = tw.TaskbarWidget._choose(
+        _fake_widget(space, {"widget_size": "full"}), (0, 0, 3200, 72))
+    assert size == "full"
+
+
+def test_without_a_map_the_bar_keeps_the_old_spot_beside_the_clock():
+    size, x = tw.TaskbarWidget._choose(_fake_widget(None), (0, 0, 3200, 72))
+    assert size == "full"
+    assert x == 3200 - tw.layout_width({}, "full")
+
+
+def test_a_dragged_bar_is_anchored_by_the_edge_it_was_dropped_at():
+    w = _fake_widget(None, {"widget_taskbar_offset": {"right": 500}})
+    assert tw.TaskbarWidget._anchor(w, (0, 0, 3200, 72)) == (2700, True)
+    w = _fake_widget(None, {"widget_position": {"x": 40, "y": 5}}, embedded=False)
+    assert tw.TaskbarWidget._anchor(w, (0, 0, 3200, 72)) == (40, False)
+    assert tw.TaskbarWidget._anchor(_fake_widget(None), (0, 0, 3200, 72)) is None
+
+
+def test_covering_a_button_is_detected():
+    import taskbar_space as ts
+    w = _fake_widget(ts.Space((0, 0, 3200, 72), 3000, ((100, 900), (3000, 3200))))
+    assert tw.TaskbarWidget._covers_something(w, (850, 0, 1200, 72))
+    assert not tw.TaskbarWidget._covers_something(w, (900, 0, 1200, 72))
+
+
+def test_a_click_does_not_pin_the_bar():
+    """A click (or the double-click that opens the dashboard) used to save
+    the spot, which silently switched off the automatic placement."""
+    import types
+    saved = []
+    w = types.SimpleNamespace(_dragging=True, _drag_moved=False, embedded=True,
+                              _pending_right=5,
+                              save_taskbar_offset=lambda r: saved.append(r))
+    w.redraw_last = lambda: None
+    w._refit = lambda: None
+    tw.TaskbarWidget._on_release(w, None)
+    assert saved == [] and w._dragging is False
+    w._drag_moved = True
+    tw.TaskbarWidget._on_release(w, None)
+    assert saved == [5]
