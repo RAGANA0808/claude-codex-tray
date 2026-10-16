@@ -415,11 +415,26 @@ def _collect_codex_local(cfg: dict) -> CodexSnapshot:
 
 # ---------- Claude Code parser ----------
 
-def _iter_claude_files(root: Path) -> Iterable[Path]:
-    if not root.exists():
-        return
-    for p in root.rglob("*.jsonl"):
-        yield p
+def _iter_claude_files(root: Path) -> Iterable[tuple[str, float, int]]:
+    """(path, mtime, size) of every *.jsonl under root. os.scandir hands back
+    mtime and size with the listing on Windows, so this walks thousands of
+    transcripts without a stat call per file."""
+    stack = [str(root)]
+    while stack:
+        try:
+            it = os.scandir(stack.pop())
+        except OSError:
+            continue
+        with it:
+            for e in it:
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(e.path)
+                    elif e.name.endswith(".jsonl"):
+                        st = e.stat(follow_symlinks=False)
+                        yield e.path, st.st_mtime, st.st_size
+                except OSError:
+                    continue
 
 
 def _parse_ts(ts: str) -> float:
@@ -1298,6 +1313,78 @@ def collect_claude(cfg: dict) -> ClaudeSnapshot:
     return _enrich_claude_with_local_cost(snap, cfg)
 
 
+# Transcripts are append-only JSONL and run to gigabytes per week, so re-reading
+# them on every poll kept a core busy. Remember how far each file has been
+# parsed and only read what was appended since.
+# path -> {"offset": bytes consumed, "events": [(ts, rid, model, usage), ...]}
+_CLAUDE_FILE_CACHE: dict[str, dict] = {}
+
+# Walking the whole projects tree (thousands of folders) is the next biggest
+# cost, so do it once a minute and only re-stat the known recent files between.
+_CLAUDE_WALK_SECONDS = 60
+_claude_walk: dict = {"root": None, "at": 0.0, "files": []}
+
+
+def _claude_candidates(root: Path, mtime_cutoff: float) -> list[tuple[str, float, int]]:
+    now = time.monotonic()
+    if _claude_walk["root"] != str(root) or now - _claude_walk["at"] >= _CLAUDE_WALK_SECONDS:
+        files = [f for f in _iter_claude_files(root) if f[1] >= mtime_cutoff]
+        _claude_walk.update(root=str(root), at=now, files=files)
+        return files
+    out = []
+    for path, _, _ in _claude_walk["files"]:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        out.append((path, st.st_mtime, st.st_size))
+    return out
+
+
+def _read_claude_events(path: str, size: int, cutoff: float) -> list[tuple]:
+    entry = _CLAUDE_FILE_CACHE.get(path)
+    if entry is None or size < entry["offset"]:
+        # New file, or it was rewritten shorter: start over.
+        entry = {"offset": 0, "events": []}
+        _CLAUDE_FILE_CACHE[path] = entry
+    entry["events"] = [e for e in entry["events"] if e[0] >= cutoff]
+    if size == entry["offset"]:
+        return entry["events"]
+    try:
+        with open(path, "rb") as f:
+            f.seek(entry["offset"])
+            for line in f:
+                complete = line.endswith(b"\n")
+                if complete:
+                    entry["offset"] += len(line)
+                if b'"usage"' not in line or b'"assistant"' not in line:
+                    if not complete:
+                        break
+                    continue
+                try:
+                    obj = json.loads(line.decode("utf-8", errors="ignore"))
+                except Exception:
+                    if not complete:
+                        break  # still being written; pick it up next poll
+                    continue
+                if not complete:
+                    entry["offset"] += len(line)
+                if obj.get("type") != "assistant":
+                    continue
+                msg = obj.get("message") or {}
+                usage = msg.get("usage") or {}
+                if not usage:
+                    continue
+                ts = _parse_ts(obj.get("timestamp", ""))
+                if ts <= 0 or ts < cutoff:
+                    continue
+                model = msg.get("model", "")
+                entry["events"].append((ts, obj.get("requestId") or msg.get("id"), model, usage))
+    except Exception as e:
+        print(f"[claude] read fail {path}: {e}")
+    return entry["events"]
+
+
 def _enrich_claude_with_local_cost(snap: ClaudeSnapshot, cfg: dict) -> ClaudeSnapshot:
     """Compute rl_cost / real_cost from transcripts. If snap.available is False,
     fills the pct bars from the local estimate; otherwise adds informational
@@ -1323,42 +1410,25 @@ def _enrich_claude_with_local_cost(snap: ClaudeSnapshot, cfg: dict) -> ClaudeSna
     mtime_cutoff = weekly_reset_at - 86400
 
     files_scanned = 0
-    for p in _iter_claude_files(root):
-        try:
-            if p.stat().st_mtime < mtime_cutoff:
-                continue
-        except OSError:
+    live_keys: set[str] = set()
+    for path, mtime, size in _claude_candidates(root, mtime_cutoff):
+        if mtime < mtime_cutoff:
             continue
         files_scanned += 1
-        try:
-            with p.open("r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    if '"usage"' not in line or '"assistant"' not in line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except Exception:
-                        continue
-                    if obj.get("type") != "assistant":
-                        continue
-                    msg = obj.get("message") or {}
-                    usage = msg.get("usage") or {}
-                    if not usage:
-                        continue
-                    ts = _parse_ts(obj.get("timestamp", ""))
-                    if ts <= 0 or ts < cutoff_7d:
-                        continue
-                    rid = obj.get("requestId") or msg.get("id")
-                    if rid:
-                        if rid in seen_request_ids:
-                            continue
-                        seen_request_ids.add(rid)
-                    model = msg.get("model", "")
-                    if model == "<synthetic>":
-                        continue
-                    events.append((ts, model, usage))
-        except Exception as e:
-            print(f"[claude] read fail {p}: {e}")
+        live_keys.add(path)
+        for ts, rid, model, usage in _read_claude_events(path, size, cutoff_7d):
+            if ts < cutoff_7d:
+                continue
+            if rid:
+                if rid in seen_request_ids:
+                    continue
+                seen_request_ids.add(rid)
+            if model == "<synthetic>":
+                continue
+            events.append((ts, model, usage))
+    for key in list(_CLAUDE_FILE_CACHE):
+        if key not in live_keys:
+            del _CLAUDE_FILE_CACHE[key]
 
     if not events:
         if not snap.available:

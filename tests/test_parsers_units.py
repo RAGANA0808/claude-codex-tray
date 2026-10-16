@@ -278,3 +278,54 @@ def test_a_path_added_after_start_up_is_still_searched(no_cli_elsewhere, monkeyp
     monkeypatch.setattr(shutil, "which",
                         lambda name, path=None, **k: str(fresh / "claude.exe") if path else None)
     assert parsers._find_claude_cli() == fresh / "claude.exe"
+
+
+# --- incremental transcript reading ----------------------------------
+
+def _assistant_line(rid, ts="2026-01-01T00:00:00Z", tokens=10):
+    return json.dumps({
+        "type": "assistant", "timestamp": ts, "requestId": rid,
+        "message": {"model": "m", "usage": {"input_tokens": tokens}},
+    }) + "\n"
+
+
+def test_read_claude_events_reads_only_appended_lines(tmp_path, monkeypatch):
+    monkeypatch.setattr(parsers, "_CLAUDE_FILE_CACHE", {})
+    p = tmp_path / "s.jsonl"
+    p.write_text(_assistant_line("a"), encoding="utf-8")
+    first = parsers._read_claude_events(str(p), p.stat().st_size, 0.0)
+    assert [e[1] for e in first] == ["a"]
+
+    # A line still being written is left for the next poll.
+    partial = _assistant_line("b")
+    with p.open("a", encoding="utf-8") as f:
+        f.write(partial[:20])
+    got = parsers._read_claude_events(str(p), p.stat().st_size, 0.0)
+    assert [e[1] for e in got] == ["a"]
+
+    with p.open("a", encoding="utf-8") as f:
+        f.write(partial[20:])
+    got = parsers._read_claude_events(str(p), p.stat().st_size, 0.0)
+    assert [e[1] for e in got] == ["a", "b"]
+
+
+def test_read_claude_events_restarts_when_file_shrinks(tmp_path, monkeypatch):
+    monkeypatch.setattr(parsers, "_CLAUDE_FILE_CACHE", {})
+    p = tmp_path / "s.jsonl"
+    p.write_text(_assistant_line("a") + _assistant_line("b"), encoding="utf-8")
+    parsers._read_claude_events(str(p), p.stat().st_size, 0.0)
+    p.write_text(_assistant_line("c"), encoding="utf-8")
+    got = parsers._read_claude_events(str(p), p.stat().st_size, 0.0)
+    assert [e[1] for e in got] == ["c"]
+
+
+def test_read_claude_events_drops_events_before_cutoff(tmp_path, monkeypatch):
+    monkeypatch.setattr(parsers, "_CLAUDE_FILE_CACHE", {})
+    p = tmp_path / "s.jsonl"
+    p.write_text(_assistant_line("old", "2026-01-01T00:00:00Z")
+                 + _assistant_line("new", "2026-01-08T00:00:00Z"), encoding="utf-8")
+    size = p.stat().st_size
+    parsers._read_claude_events(str(p), size, 0.0)
+    cutoff = parsers._parse_ts("2026-01-05T00:00:00Z")
+    got = parsers._read_claude_events(str(p), size, cutoff)
+    assert [e[1] for e in got] == ["new"]
